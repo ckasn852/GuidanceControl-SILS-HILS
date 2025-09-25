@@ -208,6 +208,9 @@ void start_application(void)
             // 파싱 성공!
             xil_printf("Parsing successful. Original Y value: %.1f\r\n", y_val);
             //제어 알고리즘 구현 부분
+            
+            // MS
+            
             // Y 값에 1.0을 더합니다.
             y_val += 1.0;
 
