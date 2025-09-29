@@ -29,6 +29,10 @@ struct netif server_netif;
 static int complete_nw_thread;
 #define THREAD_STACKSIZE 1024
 
+//PID 생성
+PID_t pid_yaw;
+PID_t pid_pitch;
+
 #ifdef XPS_BOARD_ZCU102
 #if defined(XPAR_XIICPS_0_DEVICE_ID) || defined(XPAR_XIICPS_0_BASEADDR)
 int IicPhyReset(void);
@@ -140,6 +144,12 @@ int udp_thread()
 
 //여기까지
 
+//PID초기화 함수
+void HILS_init(void){
+	//pid_init(PID, Kp, Ki, Kd, out_max, out_min);
+	pid_init(&pid_yaw,0.1, 0.0, 0.0, 20, -20);
+	pid_init(&pid_pitch,0.1, 0.0, 0.0, 20, -20);
+}
 
 void print_app_header(void)
 {
@@ -198,6 +208,10 @@ void start_application(void)
         float p_val, y_val;
         int x_coord, y_coord;
 
+        //디버깅용 타겟 속도
+        float target_p = -18;
+        float target_y = 10;
+
         // sscanf를 사용하여 특정 형식의 문자열을 파싱합니다.
         // 성공적으로 4개의 항목을 모두 읽으면 4를 반환합니다.
         int items_scanned = sscanf(recv_buffer, "P: %f Y: %f x: %d y: %d",
@@ -208,8 +222,13 @@ void start_application(void)
             // 파싱 성공!
             xil_printf("Parsing successful. Original Y value: %.1f\r\n", y_val);
             //제어 알고리즘 구현 부분
-            
-            // MS
+            //PID 구현
+            y_val = pid_calculation(&pid_yaw, target_y, y_val);  //target*1.5 =3
+            p_val = pid_calculation(&pid_pitch, target_p, p_val);
+            char buf[32];
+            snprintf(buf, sizeof(buf), "P: %.1f Y: %.1f ",
+                                 p_val,y_val);
+            xil_printf("After PID : %s\r\n", buf);
             
             // Y 값에 1.0을 더합니다.
             y_val += 1.0;
