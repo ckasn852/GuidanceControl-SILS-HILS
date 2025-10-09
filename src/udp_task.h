@@ -16,6 +16,7 @@
 #include "lwip/sys.h"
 #include "xil_printf.h"
 #include "pid.h" //PID 헤더파일
+#include "ibvs_interface.h"
 
 // Zynq 보드가 수신 대기할 UDP 포트 번호
 // 언리얼 엔진에서 이 포트로 데이터를 보내야 합니다.
