@@ -29,14 +29,6 @@ struct netif server_netif;
 static int complete_nw_thread;
 #define THREAD_STACKSIZE 1024
 
-//PID 생성
-PID_t pid_yaw;
-PID_t pid_pitch;
-
-float tx_image_coords[2];
-float tx_target_dist;
-float velocity_out[6];
-
 #ifdef XPS_BOARD_ZCU102
 #if defined(XPAR_XIICPS_0_DEVICE_ID) || defined(XPAR_XIICPS_0_BASEADDR)
 int IicPhyReset(void);
@@ -119,7 +111,7 @@ int udp_thread()
 
 	/* initialize lwIP before calling sys_thread_new */
 	lwip_init();
-	HILS_init();
+
 	/* any thread using lwIP should be created using sys_thread_new */
 	sys_thread_new("nw_thread", network_thread, NULL,
 			THREAD_STACKSIZE, DEFAULT_THREAD_PRIO);
@@ -148,12 +140,6 @@ int udp_thread()
 
 //여기까지
 
-//PID초기화 함수
-void HILS_init(void){
-	//pid_init(PID, Kp, Ki, Kd, out_max, out_min);
-	pid_init(&pid_yaw,0.1, 0.0, 0.0, 20, -20);
-	pid_init(&pid_pitch,0.1, 0.0, 0.0, 20, -20);
-}
 
 void print_app_header(void)
 {
@@ -193,9 +179,6 @@ void start_application(void)
         close(sock);
         return;
     }
-    // 파싱된 데이터를 저장할 변수들
-	float p_val, y_val, z_dist;
-	float x_coord, y_coord;
 
     // 4. 무한 루프를 돌며 데이터 수신 및 응답
     while (1) {
@@ -211,40 +194,29 @@ void start_application(void)
         recv_buffer[n] = '\0';
         xil_printf("\nReceived raw string: \"%s\"\r\n", recv_buffer);
 
-
-
-        //디버깅용 타겟 속도
-//        float target_p = -18;
-//        float target_y = 10;
+        // 파싱된 데이터를 저장할 변수들
+        float p_val, y_val;
+        int x_coord, y_coord;
 
         // sscanf를 사용하여 특정 형식의 문자열을 파싱합니다.
         // 성공적으로 4개의 항목을 모두 읽으면 4를 반환합니다.
-        int items_scanned = sscanf(recv_buffer, "P: %f Y: %f x: %f y: %f",
+        int items_scanned = sscanf(recv_buffer, "P: %f Y: %f x: %d y: %d",
                                    &p_val, &y_val, &x_coord, &y_coord);
-		tx_image_coords[0] = x_coord;
-		tx_image_coords[1] = y_coord;
-		tx_target_dist = 100;
 
         // [핵심 로직] 파싱이 성공했는지 확인
         if (items_scanned == 4) {
             // 파싱 성공!
             xil_printf("Parsing successful. Original Y value: %.1f\r\n", y_val);
             //제어 알고리즘 구현 부분
-            IBVS_calculation(velocity_out, tx_image_coords[0],tx_image_coords[1], tx_target_dist);
-            //PID 구현
-            p_val = pid_calculation(&pid_pitch, velocity_out[4], p_val);
-            y_val = pid_calculation(&pid_yaw, velocity_out[5], y_val);  //target*1.5 =3
-            char buf[32];
-            snprintf(buf, sizeof(buf), "P: %.1f Y: %.1f ",
-                                 p_val,y_val);
-            xil_printf("After PID : %s\r\n", buf);
+            
+            // MS
             
             // Y 값에 1.0을 더합니다.
-            //y_val += 1.0;
+            y_val += 1.0;
 
             // snprintf를 사용하여 응답 문자열을 다시 만듭니다.
             // %.1f는 소수점 첫째 자리까지만 표시하도록 합니다.
-            snprintf(send_buffer, sizeof(send_buffer), "P: %.1f Y: %.1f x: %.1f y: %.1f",
+            snprintf(send_buffer, sizeof(send_buffer), "P: %.1f Y: %.1f x: %d y: %d",
                      p_val, y_val, x_coord, y_coord);
 
             // 처리된 문자열을 클라이언트에게 다시 보냅니다.
@@ -262,7 +234,6 @@ void start_application(void)
             sendto(sock, error_msg, strlen(error_msg), 0,
                    (struct sockaddr *)&client_addr, client_addr_len);
         }
-        z_dist -= 30.0;
     }
 
     close(sock);

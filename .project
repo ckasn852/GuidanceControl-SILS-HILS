@@ -3,7 +3,7 @@
 	<name>HILS</name>
 	<comment>Created by Vitis v2024.2</comment>
 	<projects>
-		<project>HIL_sys</project>
+		<project>design_1_wrapper</project>
 	</projects>
 	<buildSpec>
 		<buildCommand>

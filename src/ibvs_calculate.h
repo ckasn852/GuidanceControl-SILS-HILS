@@ -3,7 +3,7 @@
 
 #include "matrix_calculation.h"
 
-void error_calculation();
-void IBVS_calculation();
+void calculate_target_coords_error(float target_x, float target_y);
+int IBVS_calculation(float* velocity_out, float x, float y, float Z );
 
 #endif /*__IBVS_H_*/
