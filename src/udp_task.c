@@ -1,37 +1,57 @@
 /*
  * Copyright (C) 2017 - 2019 Xilinx, Inc.
  * All rights reserved.
- * ... (¶óÀÌ¼±½º Çì´õ´Â µ¿ÀÏ) ...
+ * ... (ë¼ì´ì„ ìŠ¤ í—¤ë”ëŠ” ë™ì¼) ...
  */
 
 
 
 
-#include "udp_task.h" // ½ÇÁ¦ ÆÄÀÏ¸í¿¡ ¸Â°Ô À¯Áö
+#include "udp_task.h" // ì‹¤ì œ íŒŒì¼ëª…ì— ë§ê²Œ ìœ ì§€
 
-#include <stdio.h>  // sscanf, snprintf ¸¦ À§ÇØ Ãß°¡
-#include <string.h> // memset, strlen ¸¦ À§ÇØ Ãß°¡
+#include <stdio.h>  // sscanf, snprintf ë¥¼ ìœ„í•´ ì¶”ê°€
+#include <string.h> // memset, strlen ë¥¼ ìœ„í•´ ì¶”ê°€
 #include <sleep.h>
 #include "netif/xadapter.h"
 #include "platform_config.h"
 #include "xil_printf.h"
 #include "lwip/init.h"
 #include "lwip/inet.h"
+#include "pid.h" 			//PID í—¤ë”íŒŒì¼
+#include "ibvs_calculate.h" //IBVS í—¤ë”íŒŒì¼
+#include "xtime_l.h"		//ì‹œê°„ ì¸¡ì • ë¼ì´ë¸ŒëŸ¬ë¦¬
 
 #define DEFAULT_IP_ADDRESS "192.168.1.10"
 #define DEFAULT_IP_MASK "255.255.255.0"
 #define DEFAULT_GW_ADDRESS "192.168.1.1"
 #define MAX_BUFFER_LEN 256
 extern struct netif server_netif;
-// ¼ö½Å ¹× ¼Û½ÅÀ» À§ÇÑ ¹öÆÛÀÇ ÃÖ´ë Å©±â¸¦ Á¤ÀÇ
 
+// ìˆ˜ì‹  ë° ì†¡ì‹ ì„ ìœ„í•œ ë²„í¼ì˜ ìµœëŒ€ í¬ê¸°ë¥¼ ì •ì˜
 struct netif server_netif;
 static int complete_nw_thread;
 #define THREAD_STACKSIZE 1024
 
-//PID »ı¼º
+//IBVS ê´€ë ¨ ìƒìˆ˜
+float tx_image_coords[2];	// ì´ë¯¸ì§€ ì¢Œí‘œ
+float velocity_out[2];		// IBVS ê³„ì‚° ê°’ ì €ì¥ ë°°ì—´
+int ibvs_e;
+
+//PID ìƒì„±
+PID_Config_t pid_set;
 PID_t pid_yaw;
 PID_t pid_pitch;
+float yaw_deg;
+float pitch_deg;
+
+//ì‹œê°„ ì¸¡ì •ìš© ë³€ìˆ˜ ì„¤ì •
+XTime t_start, t_end;
+double elapsed_us;
+
+//ë””ë²„ê¹…ìš©
+char buf[100];	//ì œì–´ ì•Œê³ ë¦¬ì¦˜ ë””ë²„ê¹…ìš© ë²„í¼
+
+
 
 #ifdef XPS_BOARD_ZCU102
 #if defined(XPAR_XIICPS_0_DEVICE_ID) || defined(XPAR_XIICPS_0_BASEADDR)
@@ -115,6 +135,7 @@ int udp_thread()
 
 	/* initialize lwIP before calling sys_thread_new */
 	lwip_init();
+	HILS_init();	//HILSê´€ë ¨ ì´ˆê¸°í™” í•¨ìˆ˜
 
 	/* any thread using lwIP should be created using sys_thread_new */
 	sys_thread_new("nw_thread", network_thread, NULL,
@@ -142,13 +163,15 @@ int udp_thread()
 	return 0;
 }
 
-//¿©±â±îÁö
 
-//PIDÃÊ±âÈ­ ÇÔ¼ö
+//PIDì´ˆê¸°í™” í•¨ìˆ˜
 void HILS_init(void){
-	//pid_init(PID, Kp, Ki, Kd, out_max, out_min);
-	pid_init(&pid_yaw,0.1, 0.0, 0.0, 20, -20);
-	pid_init(&pid_pitch,0.1, 0.0, 0.0, 20, -20);
+	//PID ê²Œì¸ ì„¤ì •
+	pid_config_init(&pid_set, 1.0, 0.0, 0.00, 35, -35);
+
+	//pid_init(PID, pid_set);
+	pid_init(&pid_pitch, &pid_set);
+	pid_init(&pid_yaw,&pid_set);
 }
 
 void print_app_header(void)
@@ -167,31 +190,34 @@ void start_application(void)
     socklen_t client_addr_len = sizeof(client_addr);
     int n;
 
-    // ¼ö½Å/¼Û½ÅÀ» À§ÇÑ ¹öÆÛ ¼±¾ğ
+    // ìˆ˜ì‹ /ì†¡ì‹ ì„ ìœ„í•œ ë²„í¼ ì„ ì–¸
     char recv_buffer[MAX_BUFFER_LEN];
     char send_buffer[MAX_BUFFER_LEN];
 
-    // 1. UDP ¼ÒÄÏ »ı¼º
+    // 1. UDP ì†Œì¼“ ìƒì„±
     if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         xil_printf("Error: Could not create socket\r\n");
         return;
     }
 
-    // 2. ¼­¹ö ÁÖ¼Ò ¼³Á¤
+    // 2. ì„œë²„ ì£¼ì†Œ ì„¤ì •
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(UDP_CONN_PORT);
     server_addr.sin_addr.s_addr = INADDR_ANY;
 
-    // 3. ¼ÒÄÏ¿¡ ÁÖ¼Ò ÇÒ´ç (¹ÙÀÎµù)
+    // 3. ì†Œì¼“ì— ì£¼ì†Œ í• ë‹¹ (ë°”ì¸ë”©)
     if (bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         xil_printf("Error: Failed to bind socket\r\n");
         close(sock);
         return;
     }
 
-    // 4. ¹«ÇÑ ·çÇÁ¸¦ µ¹¸ç µ¥ÀÌÅÍ ¼ö½Å ¹× ÀÀ´ä
+    TickType_t xLastWakeTime;
+
+    // 4. ë¬´í•œ ë£¨í”„ë¥¼ ëŒë©° ë°ì´í„° ìˆ˜ì‹  ë° ì‘ë‹µ
     while (1) {
+    	xLastWakeTime = xTaskGetTickCount();
         n = recvfrom(sock, recv_buffer, sizeof(recv_buffer) - 1, 0,
                      (struct sockaddr *)&client_addr, &client_addr_len);
 
@@ -200,59 +226,81 @@ void start_application(void)
             continue;
         }
 
-        // ¼ö½ÅµÈ µ¥ÀÌÅÍÀÇ ³¡¿¡ Null ¹®ÀÚ¸¦ Ãß°¡ÇÏ¿© C-½ºÅ¸ÀÏ ¹®ÀÚ¿­·Î ¸¸µì´Ï´Ù.
+        // ìˆ˜ì‹ ëœ ë°ì´í„°ì˜ ëì— Null ë¬¸ìë¥¼ ì¶”ê°€í•˜ì—¬ C-ìŠ¤íƒ€ì¼ ë¬¸ìì—´ë¡œ ë§Œë“­ë‹ˆë‹¤.
         recv_buffer[n] = '\0';
         xil_printf("\nReceived raw string: \"%s\"\r\n", recv_buffer);
 
-        // ÆÄ½ÌµÈ µ¥ÀÌÅÍ¸¦ ÀúÀåÇÒ º¯¼öµé
-        float p_val, y_val;
-        int x_coord, y_coord;
+        // íŒŒì‹±ëœ ë°ì´í„°ë¥¼ ì €ì¥í•  ë³€ìˆ˜ë“¤
+        float p_val, y_val ;
+        float x_coord, y_coord;
 
-        //µğ¹ö±ë¿ë Å¸°Ù ¼Óµµ
-        float target_p = -18;
-        float target_y = 10;
 
-        // sscanf¸¦ »ç¿ëÇÏ¿© Æ¯Á¤ Çü½ÄÀÇ ¹®ÀÚ¿­À» ÆÄ½ÌÇÕ´Ï´Ù.
-        // ¼º°øÀûÀ¸·Î 4°³ÀÇ Ç×¸ñÀ» ¸ğµÎ ÀĞÀ¸¸é 4¸¦ ¹İÈ¯ÇÕ´Ï´Ù.
-        int items_scanned = sscanf(recv_buffer, "P: %f Y: %f x: %d y: %d",
+        // sscanfë¥¼ ì‚¬ìš©í•˜ì—¬ íŠ¹ì • í˜•ì‹ì˜ ë¬¸ìì—´ì„ íŒŒì‹±í•©ë‹ˆë‹¤.
+        // ì„±ê³µì ìœ¼ë¡œ 4ê°œì˜ í•­ëª©ì„ ëª¨ë‘ ì½ìœ¼ë©´ 4ë¥¼ ë°˜í™˜í•©ë‹ˆë‹¤.
+        int items_scanned = sscanf(recv_buffer, "P: %f Y: %f x: %f y: %f",
                                    &p_val, &y_val, &x_coord, &y_coord);
 
-        // [ÇÙ½É ·ÎÁ÷] ÆÄ½ÌÀÌ ¼º°øÇß´ÂÁö È®ÀÎ
+        // ì´ë¯¸ì§€ ì¢Œí‘œ
+        tx_image_coords[0] = x_coord;
+        tx_image_coords[1] = y_coord;
+
+
+        // [í•µì‹¬ ë¡œì§] íŒŒì‹±ì´ ì„±ê³µí–ˆëŠ”ì§€ í™•ì¸
         if (items_scanned == 4) {
-            // ÆÄ½Ì ¼º°ø!
-            xil_printf("Parsing successful. Original Y value: %.1f\r\n", y_val);
-            //Á¦¾î ¾Ë°í¸®Áò ±¸Çö ºÎºĞ
-            //PID ±¸Çö
-            y_val = pid_calculation(&pid_yaw, target_y, y_val);  //target*1.5 =3
-            p_val = pid_calculation(&pid_pitch, target_p, p_val);
-            char buf[32];
-            snprintf(buf, sizeof(buf), "P: %.1f Y: %.1f ",
-                                 p_val,y_val);
-            xil_printf("After PID : %s\r\n", buf);
-            
-            // Y °ª¿¡ 1.0À» ´õÇÕ´Ï´Ù.
-            y_val += 1.0;
+            // íŒŒì‹± ì„±ê³µ!
+            xil_printf("Parsing successful.\r\n");
 
-            // snprintf¸¦ »ç¿ëÇÏ¿© ÀÀ´ä ¹®ÀÚ¿­À» ´Ù½Ã ¸¸µì´Ï´Ù.
-            // %.1f´Â ¼Ò¼öÁ¡ Ã¹Â° ÀÚ¸®±îÁö¸¸ Ç¥½ÃÇÏµµ·Ï ÇÕ´Ï´Ù.
-            snprintf(send_buffer, sizeof(send_buffer), "P: %.1f Y: %.1f x: %d y: %d",
-                     p_val, y_val, x_coord, y_coord);
+            XTime_GetTime(&t_start);
+            //ì œì–´ ì•Œê³ ë¦¬ì¦˜ êµ¬í˜„ ë¶€ë¶„
+            //IBVS ì‹¤í–‰
+            ibvs_e = IBVS_calculation(velocity_out, x_coord, y_coord);
+            if(ibvs_e < 0 )continue;
 
-            // Ã³¸®µÈ ¹®ÀÚ¿­À» Å¬¶óÀÌ¾ğÆ®¿¡°Ô ´Ù½Ã º¸³À´Ï´Ù.
+            snprintf(buf, sizeof(buf), "omega_pitch: %.4f    omega_yaw: %.4f ",
+                                        velocity_out[0],velocity_out[1]);
+            xil_printf("After IBVS, %s\r\n", buf);
+
+            //PID êµ¬í˜„
+            pitch_deg = pid_calculation(&pid_pitch, velocity_out[0], p_val);
+            yaw_deg = pid_calculation(&pid_yaw, velocity_out[1], y_val);
+
+            //snprintf(buf, sizeof(buf), "p_error:%.4f  Y_error:%.4f P_deg: %.4f Y_deg: %.4f "
+            //							,pid_pitch.pre_e, pid_yaw.pre_e, pitch_deg, yaw_deg);
+
+            matrix_scalar_mul((float)(t_end - t_start) / (float)COUNTS_PER_SECOND, velocity_out, 2, 1);
+            snprintf(buf, sizeof(buf), " P_deg: %.4f Y_deg: %.4f "
+                 							 , pitch_deg, yaw_deg);
+            xil_printf("IBVS-> deg : %s\r\n", buf);
+            // snprintfë¥¼ ì‚¬ìš©í•˜ì—¬ ì‘ë‹µ ë¬¸ìì—´ì„ ë‹¤ì‹œ ë§Œë“­ë‹ˆë‹¤.
+            // %.1fëŠ” ì†Œìˆ˜ì  ì²«ì§¸ ìë¦¬ê¹Œì§€ë§Œ í‘œì‹œí•˜ë„ë¡ í•©ë‹ˆë‹¤.
+            snprintf(send_buffer, sizeof(send_buffer), "P: %.5f Y: %.5f x: %.5f y: %.5f",
+            		pitch_deg, yaw_deg, x_coord, y_coord);
+
+            // ì²˜ë¦¬ëœ ë¬¸ìì—´ì„ í´ë¼ì´ì–¸íŠ¸ì—ê²Œ ë‹¤ì‹œ ë³´ëƒ…ë‹ˆë‹¤.
             sendto(sock, send_buffer, strlen(send_buffer), 0,
                    (struct sockaddr *)&client_addr, client_addr_len);
 
             xil_printf("Sent back modified string: \"%s\"\r\n", send_buffer);
 
         } else {
-            // ÆÄ½Ì ½ÇÆĞ! ¼ö½ÅµÈ ¹®ÀÚ¿­ÀÇ Çü½ÄÀÌ ¿¹»ó°ú ´Ù¸¨´Ï´Ù.
+            // íŒŒì‹± ì‹¤íŒ¨! ìˆ˜ì‹ ëœ ë¬¸ìì—´ì˜ í˜•ì‹ì´ ì˜ˆìƒê³¼ ë‹¤ë¦…ë‹ˆë‹¤.
             xil_printf("Warning: Received string does not match expected format.\r\n");
 
-            // ¿¡·¯ ¸Ş½ÃÁö¸¦ Å¬¶óÀÌ¾ğÆ®¿¡°Ô º¸³¾ ¼öµµ ÀÖ½À´Ï´Ù.
+            // ì—ëŸ¬ ë©”ì‹œì§€ë¥¼ í´ë¼ì´ì–¸íŠ¸ì—ê²Œ ë³´ë‚¼ ìˆ˜ë„ ìˆìŠµë‹ˆë‹¤.
             const char *error_msg = "Error: Invalid string format received by Zynq.";
             sendto(sock, error_msg, strlen(error_msg), 0,
                    (struct sockaddr *)&client_addr, client_addr_len);
         }
+        XTime_GetTime(&t_end);
+
+        //ì‹œê°„ ê³„ì‚°
+        elapsed_us = 1e6 * (double)(t_end - t_start) / (double)COUNTS_PER_SECOND;
+        u32 elapsed_int_us = (u32)elapsed_us;
+        u32 elapsed_int_ms = elapsed_int_us / 1000;
+
+        xil_printf("Processing+Send time: %u us (~%u ms)\r\n",elapsed_int_us, elapsed_int_ms);
+
+        //vTaskDelayUntil(&xLastWakeTime, 20);
     }
 
     close(sock);
