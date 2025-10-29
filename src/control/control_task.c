@@ -14,7 +14,7 @@ void control_task(){
 	// PID 컨트롤러 인스턴스
 	PID_t pid_yaw;
 	PID_t pid_pitch;
-	PID_Config_t pid_gain
+	PID_Config_t pid_gain;
 
 	float velocity_out[6]; 					// 목표 각속도 벡터
 	float x, y, dist, cur_pitch, cur_yaw;	// 타겟 x,y 좌표(오차), 거리, 동체의 현재 Pitch, Yaw 각속도

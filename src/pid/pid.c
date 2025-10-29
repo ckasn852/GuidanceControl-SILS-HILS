@@ -16,7 +16,7 @@ void pid_config_init(PID_Config_t* pid_set ,float Kp, float Ki, float Kd, float 
 	pid_set->out_min = out_min;
 }
 
-void pid_init(PID_t* pid, float Kp, float Ki, float Kd, float out_max, float out_min) {
+void pid_init(PID_t* pid, PID_Config_t* pid_set) {
 	pid->Kp = pid_set->Kp;
 	pid->Ki = pid_set->Ki;
 	pid->Kd = pid_set->Kd;
