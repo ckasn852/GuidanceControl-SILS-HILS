@@ -29,7 +29,7 @@ void pid_init(PID_t* pid, PID_Config_t* pid_set) {
 float pid_calculation(PID_t* pid, float omega, float gyro) {
 
 	// 오차(Error) 계산 및 스케일 보정 (IBVS Lambda 값과 싱크 맞춤)
-	e = (omega - gyro) * 0.001;
+	e = (omega - gyro) * 0.002;
 
 	// PID (비례항, 적분항, 미분항) 계산
 	proportional = pid->Kp * e;

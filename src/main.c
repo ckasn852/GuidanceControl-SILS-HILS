@@ -45,13 +45,14 @@
 
 #define TASK_STACKSIZE  1024
 
-extern SemaphoreHandle_t gNetworkInitMutex;
+SemaphoreHandle_t networkInitMutex;
+SemaphoreHandle_t printMutex;
 
 static void network_init_task(void *arg)
 {
     (void)arg; // 안 쓰면 경고 방지
 
-    if (xSemaphoreTake(gNetworkInitMutex, portMAX_DELAY) != pdTRUE) {
+    if (xSemaphoreTake(networkInitMutex, portMAX_DELAY) != pdTRUE) {
         xil_printf("network_init_task: mutex take fail\r\n");
         vTaskDelete(NULL);
         return;
@@ -61,7 +62,7 @@ static void network_init_task(void *arg)
     network_bootstrap();
 
     // 초기화 완료 -> 이제 rx_task 같은 애들이 네트워크 사용해도 됨
-    xSemaphoreGive(gNetworkInitMutex);
+    xSemaphoreGive(networkInitMutex);
 
     // 설정 초기화 되면 태스크 삭제
     vTaskDelete(NULL);
@@ -69,31 +70,31 @@ static void network_init_task(void *arg)
 
 int main()
 {
-
     xil_printf("\n\r\n\r");
     xil_printf("Zynq board Boot Successful\r\n");
     xil_printf("-----lwIP Socket Mode UDP Client Application------\r\n");
 
-    // ★ mutex 생성 (스케줄러 시작 전 1회만)
-    gNetworkInitMutex = xSemaphoreCreateMutex();
-    if (gNetworkInitMutex == NULL) {
-        xil_printf("ERROR: gNetworkInitMutex create failed\r\n");
-        for(;;);
-    }
-
+    networkInitMutex = xSemaphoreCreateMutex();		// 네트워크 초기화 뮤텍스 생성
+    printMutex = xSemaphoreCreateMutex();			// 프린트 뮤텍스 생성
 
     // 제어 데이터 큐 초기화
     control_queue_init();
 
     // 네트워크 초기화 태스크 생성
-    xTaskCreate(
-    		network_init_task,
-			"network_init_task",
-			TASK_STACKSIZE,
-			NULL,
-			tskIDLE_PRIORITY+3,
-			NULL
-    );
+    xTaskCreate(network_init_task,
+				"network_init_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+4,
+				NULL);
+
+    // 제어 태스크 생성
+	xTaskCreate(control_task,
+				"control_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+3,
+				NULL);
 
     // 수신 태스크 생성
 	xTaskCreate(rx_task,
@@ -103,20 +104,13 @@ int main()
 				tskIDLE_PRIORITY+2,
 				NULL);
 
-    // 제어 태스크 생성
-	xTaskCreate(control_task,
-				"control_task",
-				TASK_STACKSIZE,
-				NULL,
-				tskIDLE_PRIORITY+1,
-				NULL);
 
     // 송신 태스크 생성
     xTaskCreate(tx_task,
 				"tx_task",
 				TASK_STACKSIZE,
 				NULL,
-				tskIDLE_PRIORITY,
+				tskIDLE_PRIORITY+1,
 				NULL);
 
 

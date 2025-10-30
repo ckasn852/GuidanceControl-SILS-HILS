@@ -1,134 +1,86 @@
+// ibvs_calculate.c
+// 회전 전용(ωx, ωy) 2x2 IBVS 버전. Z 불필요, -lm 불필요.
+// 출력: Vc[3]=Pitch(ωx), Vc[4]=Yaw(ωy)만 사용. 나머지 0.
+// 픽셀 좌표 사용 시 LAMBDA는 충분히 작/크게 조정하세요. (정규화 좌표 권장)
+
+// 필요 시 사용
 #include "ibvs_calculate.h"
 
-#include <math.h>   // fabsf
+#include <stdbool.h>
 #include <stdio.h>
+#include <float.h>   // FLT_MAX
 
+#ifndef CENTER_X
 #define CENTER_X 0.0f
+#endif
+#ifndef CENTER_Y
 #define CENTER_Y 0.0f
+#endif
 
-#define LAMBDA   3000.0f
+#ifndef LAMBDA
+#define LAMBDA 3000.0f
+#endif
 
-#define LM_DAMP_INIT       1e-6f
-#define LM_DAMP_MAX        1e-2f
-#define DIST_MIN_CLAMP        1e-6f
+// 디버그 로그를 보고 싶으면 주석 해제
+// #define IBVS_DEBUG
 
-float Jacobian[2][6];
-float Jacobian_Transpose[6][2];
-float Jacobian_Pseudo_Inverse[6][2];
-float M[2][2];
-float M_inv[2][2];
-float Cur_Error[2] = { 0.0f, 0.0f };
-
-float M_damped[2][2];
-float mu = LM_DAMP_INIT;
-int ok = -1;
-
-static void create_jacobian(float x, float y, float Z, float Jacobian[2][6]) {
-
-    Jacobian[0][0] = -1.0f / Z;
-    Jacobian[0][1] = 0.0f;
-    Jacobian[0][2] = x / Z;
-    Jacobian[0][3] = x * y;
-    Jacobian[0][4] = -(1.0f + x * x);
-    Jacobian[0][5] = y;
-
-    Jacobian[1][0] = 0.0f;
-    Jacobian[1][1] = -1.0f / Z;
-    Jacobian[1][2] = y / Z;
-    Jacobian[1][3] = 1.0f + y * y;
-    Jacobian[1][4] = -x * y;
-    Jacobian[1][5] = -x;
+// NaN/Inf 간단 체크 (libm 없이)
+static inline bool is_finitef(float x) {
+    if (!(x == x)) return false;       // NaN
+    float ax = (x >= 0.0f) ? x : -x;   // |x|
+    return (ax <= FLT_MAX);            // Inf 방지
 }
 
-static void transpose_2x6(const float Jacobian[2][6], float Jacobian_Transpose[6][2]) {
-    for (int i = 0; i < 2; ++i) {
-        for (int j = 0; j < 6; ++j) {
-            Jacobian_Transpose[j][i] = Jacobian[i][j];
-        }
-    }
-}
+// 메인: 회전 2x2만 사용
+// Vc: [0]=Vx, [1]=Vy, [2]=Vz, [3]=ωx(Pitch), [4]=ωy(Yaw), [5]=ωz(Roll)
+void ibvs_calculate(float img_x, float img_y, float /*dist_unused*/, float* velocity_out)
+{
+    if (!velocity_out) return;
 
-static void multiply_2x6_by_6x2(const float Jacobian[2][6], const float Jacobian_Transpose[6][2], float M[2][2]) {
-    for (int i = 0; i < 2; ++i) {
-        for (int j = 0; j < 2; ++j) {
-            float acc = 0.0f;
-            for (int k = 0; k < 6; ++k) {
-                acc += Jacobian[i][k] * Jacobian_Transpose[k][j];
-            }
-            M[i][j] = acc;
-        }
-    }
-}
+    // 출력 초기화
+    for (int i = 0; i < 6; ++i) velocity_out[i] = 0.0f;
 
-static int invert_2x2(const float M[2][2], float M_inv[2][2]) {
-    const float a = M[0][0], b = M[0][1];
-    const float c = M[1][0], d = M[1][1];
+    // 에러 벡터 e = [x; y]
+    float x = img_x - CENTER_X;
+    float y = img_y - CENTER_Y;
 
-    const float det = a * d - b * c;
-
-    if (fabsf(det) < 1e-12f) return -1;
-
-    const float inv_det = 1.0f / det;
-    M_inv[0][0] = d * inv_det;
-    M_inv[0][1] = -b * inv_det;
-    M_inv[1][0] = -c * inv_det;
-    M_inv[1][1] = a * inv_det;
-    return 0;
-}
-
-// 6x2 = 6x2 * 2x2  (Jacobian_Pseudo_Inverse = Jacobian_Transpose * M_inv)
-static void multiply_6x2_by_2x2(const float Jacobian_Transpose[6][2], const float M_inv[2][2], float Jacobian_Pseudo_Inverse[6][2]) {
-    for (int i = 0; i < 6; ++i) {
-        for (int j = 0; j < 2; ++j) {
-            Jacobian_Pseudo_Inverse[i][j] = Jacobian_Transpose[i][0] * M_inv[0][j] + Jacobian_Transpose[i][1] * M_inv[1][j];
-        }
-    }
-}
-
-// 6x1 = 6x2 * 2x1  (Vc = Jacobian_Pseudo_Inverse * b)
-static void multiply_6x2_by_2x1(const float Jacobian_Pseudo_Inverse[6][2], const float Cur_Error[2], float Vc[6]) {
-    /*
-    Vc[0] : X, Vc[1] : Y, Vc[2] : Z
-    Vc[3] : Pitch, Vc[4] : Yaw, Vc[5] : Roll  */
-    for (int i = 0; i < 6; ++i) {
-        Vc[i] = Jacobian_Pseudo_Inverse[i][0] * Cur_Error[0] + Jacobian_Pseudo_Inverse[i][1] * Cur_Error[1];
-            // printf("Vc[%d] : %.8f, Jacobian_Pseudo_Inverse[i][0] : %.8f, Jacobian_Pseudo_Inverse[i][1] %.8f, Cur_Error[0] : %.8f, Cur_Error[1] : %.8f \n",
-            // i , Vc[i], Jacobian_Pseudo_Inverse[i][0], Jacobian_Pseudo_Inverse[i][1], Cur_Error[0], Cur_Error[1]);
-    }
-}
-
-void ibvs_calculate(float img_x, float img_y, float dist, float* velocity_out) {
-    const float error[2] = { img_x - CENTER_X, img_y - CENTER_Y };
-
-    create_jacobian(error[0], error[1], dist, Jacobian);
-    transpose_2x6(Jacobian, Jacobian_Transpose);
-    multiply_2x6_by_6x2(Jacobian, Jacobian_Transpose, M);
-
-    for (;;) {
-        // M_damped = M + mu * I
-        M_damped[0][0] = M[0][0] + mu;
-        M_damped[0][1] = M[0][1];
-        M_damped[1][0] = M[1][0];
-        M_damped[1][1] = M[1][1] + mu;
-
-        ok = invert_2x2(M_damped, M_inv);
-        if (ok == 0) break;
-        if (mu >= LM_DAMP_MAX) break;
-        mu *= 10.0f;
-    }
-
-    if (ok != 0) {
-        for (int i = 0; i < 6; ++i) velocity_out[i] = 0.0f;
+    // 유효성 가드 (문제 있는 입력이면 0 반환)
+    if (!is_finitef(x) || !is_finitef(y)) {
         return;
     }
 
-    multiply_6x2_by_2x2(Jacobian_Transpose, M_inv, Jacobian_Pseudo_Inverse);
+    // 회전 성분 자코비안 Lw (2x2), 포인트 특징(정규화 좌표) 기준
+    // Lw = [ x*y,       -(1+x^2)
+    //        1+y^2,     -x*y     ]
+    float a = x * y;
+    float b = -(1.0f + x * x);
+    float c = 1.0f + y * y;
+    float d = -x * y;
 
-    Cur_Error[0] = LAMBDA * error[0];
-    Cur_Error[1] = LAMBDA * error[1];
+    // det(Lw) = 1 + x^2 + y^2  (항상 > 0)
+    float det = 1.0f + x * x + y * y;
 
-//    printf("Error[0] : %.4f, Error[1] : %.4f\n", error[0], error[1]);
-//    printf("Cur_Error_X : %.4f, Cur_Error_Y : %.4f\n", Cur_Error[0], Cur_Error[1]);
+    // 수치 가드 (이론상 >0 이지만 극단치 방지)
+    if (!(det > 0.0f)) {
+        return;
+    }
 
-    multiply_6x2_by_2x1(Jacobian_Pseudo_Inverse, Cur_Error, velocity_out);
+    float inv_det = 1.0f / det;
+
+    // b = λ * e
+    float bx = LAMBDA * x;
+    float by = LAMBDA * y;
+
+    // [ωx; ωy] = Lw^{-1} b = (1/det) * [ d  -b; -c  a ] * [bx; by]
+    float omegax = ( d * bx - b * by) * inv_det;  // Pitch
+    float omegay = (-c * bx + a * by) * inv_det;  // Yaw
+
+    // 출력 반영 (나머지는 0 유지)
+    velocity_out[3] = omegax;   // Pitch
+    velocity_out[4] = omegay;   // Yaw
+
+#ifdef IBVS_DEBUG
+    printf("[IBVS2x2] x=%.6g y=%.6g det=%.6g | wx=%.6g wy=%.6g\n",
+           x, y, det, omegax, omegay);
+#endif
 }
