@@ -29,34 +29,91 @@
 
 #include <sleep.h>
 #include "netif/xadapter.h"
-#include "platform_config.h"
 #include "xil_printf.h"
 #include "lwip/init.h"
 #include "lwip/inet.h"
+#include "rx/rx_task.h"
+#include "tx/tx_task.h"
+#include "control/control_task.h"
+#include "network_init/network_bootstrap.h"
 
-#ifdef XPS_BOARD_ZCU102
-#if defined(XPAR_XIICPS_0_DEVICE_ID) || defined(XPAR_XIICPS_0_BASEADDR)
-int IicPhyReset(void);
-#endif
-#endif
+// FreeRTOS
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "control/control_queue.h"
 
-void print_app_header();
-void start_application();
-int udp_thread();
+#define TASK_STACKSIZE  1024
 
-#define THREAD_STACKSIZE 1024
+SemaphoreHandle_t networkInitMutex;
+SemaphoreHandle_t printMutex;
 
+static void network_init_task(void *arg)
+{
+    (void)arg; // 안 쓰면 경고 방지
 
-int main_thread(){
-	sys_thread_new("udp_thread", (void(*)(void*))udp_thread, 0,
-				THREAD_STACKSIZE, DEFAULT_THREAD_PRIO);
+    if (xSemaphoreTake(networkInitMutex, portMAX_DELAY) != pdTRUE) {
+        xil_printf("network_init_task: mutex take fail\r\n");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Zynq 보드 네트워크 설정 초기화
+    network_bootstrap();
+
+    // 초기화 완료 -> 이제 rx_task 같은 애들이 네트워크 사용해도 됨
+    xSemaphoreGive(networkInitMutex);
+
+    // 설정 초기화 되면 태스크 삭제
+    vTaskDelete(NULL);
 }
 
 int main()
 {
-	//main thread 시작
-	sys_thread_new("main_thread", (void(*)(void*))main_thread, 0,
-			THREAD_STACKSIZE, DEFAULT_THREAD_PRIO);
+    xil_printf("\n\r\n\r");
+    xil_printf("Zynq board Boot Successful\r\n");
+    xil_printf("-----lwIP Socket Mode UDP Client Application------\r\n");
+
+    networkInitMutex = xSemaphoreCreateMutex();		// 네트워크 초기화 뮤텍스 생성
+    printMutex = xSemaphoreCreateMutex();			// 프린트 뮤텍스 생성
+
+    // 제어 데이터 큐 초기화
+    control_queue_init();
+
+    // 네트워크 초기화 태스크 생성
+    xTaskCreate(network_init_task,
+				"network_init_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+4,
+				NULL);
+
+    // 제어 태스크 생성
+	xTaskCreate(control_task,
+				"control_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+3,
+				NULL);
+
+    // 수신 태스크 생성
+	xTaskCreate(rx_task,
+				"rx_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+2,
+				NULL);
+
+
+    // 송신 태스크 생성
+    xTaskCreate(tx_task,
+				"tx_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+1,
+				NULL);
+
+
 	//scheduling 시작
 	vTaskStartScheduler();
 	while(1);
