@@ -3,6 +3,7 @@
 	<name>HILS</name>
 	<comment>Created by Vitis v2024.2</comment>
 	<projects>
+		<project>1022</project>
 	</projects>
 	<buildSpec>
 		<buildCommand>

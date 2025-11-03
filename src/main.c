@@ -29,88 +29,121 @@
 
 #include <sleep.h>
 #include "netif/xadapter.h"
-#include "platform_config.h"
 #include "xil_printf.h"
 #include "lwip/init.h"
 #include "lwip/inet.h"
+#include "rx/rx_task.h"
+#include "tx/tx_task.h"
+#include "control/control_task.h"
+#include "network_init/network_bootstrap.h"
 
+// FreeRTOS
 #include "FreeRTOS.h"
 #include "task.h"
-#include "queue.h"
-
-#include "udp_task.h"
-#include "servo_task.h"
-
-#ifdef XPS_BOARD_ZCU102
-#if defined(XPAR_XIICPS_0_DEVICE_ID) || defined(XPAR_XIICPS_0_BASEADDR)
-int IicPhyReset(void);
-#endif
-#endif
-
-void print_app_header();
-void start_application();
-int udp_thread();
-
-#define THREAD_STACKSIZE 1024
+#include "semphr.h"
+#include "control/control_queue.h"
+#include "motor/motor_driver_task.h"
 
 
-#define UDP_TASK_PRIORITY   ( tskIDLE_PRIORITY + 2 )
-#define SERVO_TASK_PRIORITY ( tskIDLE_PRIORITY + 3 )
+#define TASK_STACKSIZE  1024
+
+SemaphoreHandle_t networkInitMutex;
+SemaphoreHandle_t printMutex;
+QueueHandle_t xAngleQueue;
 
 
-QueueHandle_t xAngleQueue = NULL;
+static void network_init_task(void *arg)
+{
+    (void)arg; // 안 쓰면 경고 방지
 
+    if (xSemaphoreTake(networkInitMutex, portMAX_DELAY) != pdTRUE) {
+        xil_printf("network_init_task: mutex take fail\r\n");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Zynq 보드 네트워크 설정 초기화
+    network_bootstrap();
+
+    // 초기화 완료 -> 이제 rx_task 같은 애들이 네트워크 사용해도 됨
+    xSemaphoreGive(networkInitMutex);
+
+    // 설정 초기화 되면 태스크 삭제
+    vTaskDelete(NULL);
+}
 
 int main()
 {
-	xil_printf("--- System Booting ---\r\n");
+    xil_printf("\n\r\n\r");
+    xil_printf("Zynq board Boot Successful\r\n");
+    xil_printf("-----lwIP Socket Mode UDP Client Application------\r\n");
 
-	/* ================================================================== */
-	/* 1. 큐(Queue) 생성 */
-	/* ================================================================== */
-	// ServoCommand_t 타입의 데이터를 10개까지 저장할 수 있는 큐 생성
-	xAngleQueue = xQueueCreate(10, sizeof(ServoCommand_t));
+    networkInitMutex = xSemaphoreCreateMutex();		// 네트워크 초기화 뮤텍스 생성
+    printMutex = xSemaphoreCreateMutex();			// 프린트 뮤텍스 생성
 
-	if (xAngleQueue == NULL) {
-		xil_printf("Fatal Error: Failed to create xAngleQueue!\r\n");
-		while(1);
-	}
-	xil_printf("xAngleQueue created successfully.\r\n");
+    // 제어 데이터 큐 초기화
+    control_queue_init();
+
+    //
+    xAngleQueue = xQueueCreate(10, sizeof(ServoCommand_t));
+    if (xAngleQueue == NULL) {
+        xil_printf("Failed to create xAngleQueue!\r\n");
+    }
+
+    // 네트워크 초기화 태스크 생성
+    xTaskCreate(network_init_task,
+				"network_init_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+4,
+				NULL);
+
+    // 제어 태스크 생성
+	xTaskCreate(control_task,
+				"control_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+3,
+				NULL);
+
+	// 모터 초기화
+	ServoCommand_t cmd;
+	    for (int i = 0; i < 6; i++) {
+	        cmd.motor_id = i;
+	        cmd.angle = 0.0f;
+	        xQueueSend(xAngleQueue, &cmd, portMAX_DELAY);
+	    }
 
 
-	/* ================================================================== */
-	/* 2. 태스크(Task) 생성 */
-	/* ================================================================== */
 
-	// 2-1. 서보 모터 제어 태스크 생성
-	xTaskCreate(vServoControlTask,           /* 태스크 함수 포인터 */
-				"ServoTask",                 /* 태스크 이름 (디버깅용) */
-				configMINIMAL_STACK_SIZE,    /* 스택 크기 (필요시 증가) */
-				NULL,                        /* 태스크 파라미터 */
-				SERVO_TASK_PRIORITY,         /* 태스크 우선순위 */
-				NULL);                       /* 태스크 핸들 (필요 없음) */
+	// 모터 테스크 생성
+	xTaskCreate(vMotorDriverTask,
+	            "motor_driver_task",
+	            TASK_STACKSIZE,
+	            NULL,
+	            tskIDLE_PRIORITY+2,
+	            NULL);
 
-	xil_printf("vServoControlTask created.\r\n");
-
-
-	// 2-2. UDP 통신 태스크 생성 (기존 main_thread의 내용)
-	sys_thread_new("udp_thread",             /* 태스크 이름 */
-				   (void(*)(void*))udp_thread, /* 태스크 함수 */
-				   NULL,                     /* 파라미터 */
-				   THREAD_STACKSIZE,         /* 스택 크기 */
-				   UDP_TASK_PRIORITY);       /* 태스크 우선순위 */
-
-	xil_printf("udp_thread created.\r\n");
+    // 수신 태스크 생성
+	xTaskCreate(rx_task,
+				"rx_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+2,
+				NULL);
 
 
-	/* ================================================================== */
-	/* 3. FreeRTOS 스케줄러 시작 */
-	/* ================================================================== */
-	xil_printf("Starting FreeRTOS scheduler...\r\n");
+    // 송신 태스크 생성
+    xTaskCreate(tx_task,
+				"tx_task",
+				TASK_STACKSIZE,
+				NULL,
+				tskIDLE_PRIORITY+1,
+				NULL);
 
-	// scheduling 시작
+
+	//scheduling 시작
 	vTaskStartScheduler();
-
 	while(1);
 	return 0;
 }

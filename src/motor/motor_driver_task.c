@@ -1,6 +1,7 @@
-// File: servo_task.c
+// File: motor/motor_driver_task.c
+// (기존 motor/control_task.c)
 
-#include "servo_task.h"
+#include "motor_driver_task.h"
 #include "xparameters.h"
 #include "xil_io.h"
 #include "xil_printf.h"
@@ -39,8 +40,6 @@ static u32 angle_to_pulse_counts(float angle)
     if (angle > 90.0f) angle = 90.0f;
 
     // 2. 입력된 각도를 0 ~ 180 범위로 '반대로' 변환합니다.
-    // 기존: mapped_angle = angle + 90.0f;
-    // 수정: 90.0f 에서 angle을 빼서 방향을 뒤집습니다.
     float mapped_angle = 90.0f - angle;
 
     // 3. 변환된 값을 사용하여 펄스 폭(500us ~ 2500us)을 계산합니다.
@@ -49,9 +48,9 @@ static u32 angle_to_pulse_counts(float angle)
     return (u32)((float)CPU_FREQ_HZ / 1000000.0f * pulse_us);
 }
 
-// vServoControlTask 함수는 수정할 필요 없이 그대로 사용합니다.
-void vServoControlTask(void *pvParameters)
+void vMotorDriverTask(void *pvParameters)
 {
+
     u32 tcsr0_val = 0;
     u32 tcsr1_val = 0;
 
@@ -72,8 +71,6 @@ void vServoControlTask(void *pvParameters)
         Xil_Out32(TIMER_BASE_ADDRS[i] + TCSR1_OFFSET, tcsr1_val);
     }
 
-    xil_printf("All 6 servo tasks initialized.\r\n");
-
     ServoCommand_t received_cmd;
 
     while(1)
@@ -89,9 +86,6 @@ void vServoControlTask(void *pvParameters)
                 // 해당 ID의 모터(타이머) 레지스터에만 값을 씀
                 Xil_Out32(TIMER_BASE_ADDRS[received_cmd.motor_id] + TLR1_OFFSET, pulse_counts);
 
-                xil_printf("Motor %d moved to angle: %d/10\r\n",
-                           received_cmd.motor_id,
-                           (int)(received_cmd.angle * 10));
             }
         }
     }
