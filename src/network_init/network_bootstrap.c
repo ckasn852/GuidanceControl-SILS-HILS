@@ -1,7 +1,5 @@
-
-
-#include <stdio.h>         // sscanf, snprintf
-#include <string.h>        // memset, strlen
+#include <stdio.h>
+#include <string.h>
 #include <sleep.h>
 #include "xil_printf.h"
 #include "network_bootstrap.h"
@@ -14,7 +12,6 @@
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include "netif/xadapter.h"
-// ★ 추가
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
@@ -24,15 +21,14 @@ int complete_nw_thread = 0; // 0으로 초기화
 struct sockaddr_in client_addr;
 socklen_t client_addr_len = sizeof(client_addr);
 
-/// rx_task 에서 사용할 UDP 전역 소켓
+// rx_task 에서 사용할 UDP 전역 소켓
 int udp_sock = -1;
-
 
 SemaphoreHandle_t gNetworkInitMutex = NULL;
 
 // socat -v udp4-recvfrom:7777,bind=127.0.0.1,fork udp4-sendto:192.168.1.10:7777
 
-// 1. UDP 서버 초기화 함수
+// UDP 서버 초기화 함수
 int udp_server_init(UdpServerContext* ctx, int port)
 {
     // 소켓 생성
@@ -141,8 +137,7 @@ void network_bootstrap(){
 
     /* initialize lwIP before calling sys_thread_new */
     lwip_init();
-
-    xil_printf("lwip_init() called \n");
+    xil_printf("lwip_init() called\r\n");
 
     /* any thread using lwIP should be created using sys_thread_new */
     sys_thread_new("nw_thread", network_thread, NULL,
@@ -150,8 +145,6 @@ void network_bootstrap(){
 
     while (!complete_nw_thread){
     	vTaskDelay(pdMS_TO_TICKS(10));
-        // usleep(50);
-//        xil_printf("!complete_nw_thread \r\n");
     }
 
     // 징크보드 ip 할당
