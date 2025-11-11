@@ -2,7 +2,6 @@
 #define IBVS_CALCULATE_H_
 
 /**
- * @brief CBLAS와 LAPACKe를 사용하여 IBVS 계산을 수행하는 C 함수
  * @param img_x         [입력] 타겟의 이미지 x 좌표
  * @param img_y         [입력] 타겟의 이미지 y 좌표
  * @param dist          [입력] 타겟까지의 거리 (Z)

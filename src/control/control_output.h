@@ -5,6 +5,7 @@
 typedef struct {
 	float pitch_fin_deg;
 	float yaw_fin_deg;
+	int sim_state;
 } control_output;
 
 #endif

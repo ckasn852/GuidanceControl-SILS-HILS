@@ -1,14 +1,11 @@
 // ibvs_calculate.c
-// 회전 전용(ωx, ωy) 2x2 IBVS 버전. Z 불필요, -lm 불필요.
-// 출력: Vc[3]=Pitch(ωx), Vc[4]=Yaw(ωy)만 사용. 나머지 0.
-// 픽셀 좌표 사용 시 LAMBDA는 충분히 작/크게 조정하세요. (정규화 좌표 권장)
+// 출력: velocity_out[3]:pitch, velocity_out[4]:yaw만 사용. 나머지 0.
+// LAMBDA 조정 필요(제어량 조절 시)
 
-// 필요 시 사용
 #include "ibvs_calculate.h"
-
 #include <stdbool.h>
 #include <stdio.h>
-#include <float.h>   // FLT_MAX
+#include <float.h>
 
 #ifndef CENTER_X
 #define CENTER_X 0.0f
@@ -16,23 +13,26 @@
 #ifndef CENTER_Y
 #define CENTER_Y 0.0f
 #endif
-
 #ifndef LAMBDA
-#define LAMBDA 3000.0f
+#define LAMBDA 10.0f
 #endif
 
-// 디버그 로그를 보고 싶으면 주석 해제
-// #define IBVS_DEBUG
-
-// NaN/Inf 간단 체크 (libm 없이)
+// NaN/Inf 체크
 static inline bool is_finitef(float x) {
     if (!(x == x)) return false;       // NaN
     float ax = (x >= 0.0f) ? x : -x;   // |x|
     return (ax <= FLT_MAX);            // Inf 방지
 }
 
-// 메인: 회전 2x2만 사용
-// Vc: [0]=Vx, [1]=Vy, [2]=Vz, [3]=ωx(Pitch), [4]=ωy(Yaw), [5]=ωz(Roll)
+/*
+ * 메인: 회전 2x2만 사용
+ * velocity_out[0]:x
+ * velocity_out[1]:y
+ * velocity_out[2]:z
+ * velocity_out[3]:pitch
+ * velocity_out[4]:yaw
+ * velocity_out[5]:Roll
+*/
 void ibvs_calculate(float img_x, float img_y, float /*dist_unused*/, float* velocity_out)
 {
     if (!velocity_out) return;
@@ -67,20 +67,15 @@ void ibvs_calculate(float img_x, float img_y, float /*dist_unused*/, float* velo
 
     float inv_det = 1.0f / det;
 
-    // b = λ * e
+    // b = LAMBDA * e
     float bx = LAMBDA * x;
     float by = LAMBDA * y;
 
-    // [ωx; ωy] = Lw^{-1} b = (1/det) * [ d  -b; -c  a ] * [bx; by]
+    // [omegax; omegay] = Lw^{-1} b = (1/det) * [ d  -b; -c  a ] * [bx; by]
     float omegax = ( d * bx - b * by) * inv_det;  // Pitch
     float omegay = (-c * bx + a * by) * inv_det;  // Yaw
 
     // 출력 반영 (나머지는 0 유지)
     velocity_out[3] = omegax;   // Pitch
     velocity_out[4] = omegay;   // Yaw
-
-#ifdef IBVS_DEBUG
-    printf("[IBVS2x2] x=%.6g y=%.6g det=%.6g | wx=%.6g wy=%.6g\n",
-           x, y, det, omegax, omegay);
-#endif
 }
