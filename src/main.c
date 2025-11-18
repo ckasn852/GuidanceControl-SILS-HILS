@@ -5,6 +5,7 @@
 #include "lwip/inet.h"
 #include "rx/rx_task.h"
 #include "tx/tx_task.h"
+#include "imu/imu.h"
 #include "control/control_task.h"
 #include "network_init/network_bootstrap.h"
 
@@ -30,12 +31,14 @@
 #define CONTROL_STACKSIZE  1024
 #define TX_STACKSIZE       1024
 #define MOTOR_STACKSIZE    1024
+#define IMU_STACKSIZE       1024
 
 #define PRIO_NETINIT (tskIDLE_PRIORITY+4)
 #define PRIO_RX      (tskIDLE_PRIORITY+2)
 #define PRIO_CONTROL (tskIDLE_PRIORITY+5)
 #define PRIO_TX      (tskIDLE_PRIORITY+2)
 #define PRIO_MOTOR   (tskIDLE_PRIORITY+2)
+#define PRIO_IMU      (tskIDLE_PRIORITY+3) //상황에 맞춰 수정
 
 // IRQ ID/디바이스 ID
 #define TTC_DEV_ID      XPAR_XTTCPS_0_DEVICE_ID
@@ -141,6 +144,8 @@ int main()
     networkInitMutex = xSemaphoreCreateMutex();     // 네트워크 초기화 뮤텍스 생성
     printMutex = xSemaphoreCreateMutex();           // 프린트 뮤텍스 생성
 
+    IMU_Init();
+
     // 제어 데이터 큐 초기화 (최신 데이터만 사용하기 위해 길이 1 설정)
     control_queue_init();
 
@@ -170,6 +175,9 @@ int main()
 
     // 송신 태스크 생성
     xTaskCreate(tx_task, "tx_task", TX_STACKSIZE, NULL, PRIO_TX, NULL);
+
+    //IMU 태스크 생성
+    xTaskCreate(IMUTask, "IMU", 2048, IMU_STACKSIZE, PRIO_IMU, NULL);
 
     // 하드 타이머(50Hz) 시작은 스케줄러 시작 '직전'에 수행
     // FreeRTOS 핸들러 등록을 위해 task 생성 후, scheduler 시작 전에 호출
