@@ -7,11 +7,12 @@
 #include <stdbool.h>
 #include "semphr.h"
 #include "xtime_l.h"
-#include "FreeRTOS.h"
-#include "pid_tuning_mode.h"
+#include "../motor/motor_driver_task.h"
+#include "../control/pid_tuning_mode.h"
 
 // main.c 에 정의된 뮤텍스 참조
 extern SemaphoreHandle_t printMutex;
+volatile uint32_t g_isr_cnt = 0;
 
 void control_task(){
 
@@ -29,135 +30,146 @@ void control_task(){
     float pitch_fin_deg_rx, yaw_fin_deg_rx;    // Pitch, Yaw 날개 현재 각도
     int sim_state = 0;
 
+    // 동체 회전 피드 전달용
+    float cur_mis_pitch = 0.0f;
+    float cur_mis_yaw   = 0.0f;
+
     // PID Gain Pitch, Yaw 각각 적용
-//  pid_init(&pid_pitch, 50.0f, 20.0f, 0.0001f, 200.0f, -200.0f);  // 50ms 최적 PID 설정
-//  pid_init(&pid_yaw,   50.0f, 20.0f, 0.0001f, 200.0f, -200.0f);
-    pid_init(&pid_pitch, 30.0f, 15.0f, 5.0f, 80.0f, -80.0f);  // 30ms 최적 PID 설정
-    pid_init(&pid_yaw,   30.0f, 15.0f, 5.0f, 80.0f, -80.0f);
+    pid_init(&pid_pitch, 30.0f, 15.0f, 5.0f, 40.0f, -40.0f);  // 20ms 최적 PID 설정
+    pid_init(&pid_yaw,   30.0f, 15.0f, 5.0f, 40.0f, -40.0f);
 
-    // ZYNQ 보드 RTOS 20ms 고정 주기 설정
-    const TickType_t period = pdMS_TO_TICKS(20);
-    TickType_t last = xTaskGetTickCount();
-
-    // dt_real 계산용 고해상도 타임스탬프 초기화
     XTime time_last;
     XTime_GetTime(&time_last);
 
-    // 최신 샘플 유지를 위해 이전 스텝 데이터 변수 선언
     control_data last_rx = {0};
 
     // 현재 튜닝 플래그(기본: 미적용=1)
     static int g_tuning_active = 1;
 
+    // 데이터 미수신 카운터
+    static int no_data_watchdog = 0;
+    const int MAX_NO_DATA_TICKS = 5; // 20ms * 5 = 100ms (0.1초간 통신 끊기면 비상)
+
     while(1)
     {
-        vTaskDelayUntil(&last, period); // 20ms 주기
+    	// 하드타이머 ISR이 보낸 Notify를 기다림(20ms마다)
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        // 언리얼로부터 PID 업데이트/Control 플래그 논블로킹 수신
+        // 언리얼 PID 튜닝 업데이트 수신
         PIDUpdate_t upd;
         while (xQueueReceive(xPidUpdateQueue, &upd, 0) == pdTRUE) {
-            if (upd.has_params == 1 && upd.tuning_active == 0) {					// 튜닝 적용 중일 때만 반영
+            if (upd.has_params == 1 && upd.tuning_active == 0) {
                 pid_pitch.Kp = upd.Kp; pid_pitch.Ki = upd.Ki; pid_pitch.Kd = upd.Kd;
                 pid_yaw.Kp   = upd.Kp; pid_yaw.Ki   = upd.Ki; pid_yaw.Kd   = upd.Kd;
                 pid_pitch.integral = 0.0f; pid_pitch.pre_e = 0.0f;
                 pid_yaw.integral   = 0.0f; pid_yaw.pre_e   = 0.0f;
-//                if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
-//                    printf("[Control_task][MOD] Applied PID from Unreal: P=%.3f I=%.3f D=%.3f (tuning_active=%d)\r\n",
-//                           upd.Kp, upd.Ki, upd.Kd, upd.tuning_active);
-//                    xSemaphoreGive(printMutex);
-//                }
+                if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
+                    printf("[Control_task][MOD] Applied PID from Unreal: P=%.3f I=%.3f D=%.3f (tuning_active=%d)\r\n",
+                           upd.Kp, upd.Ki, upd.Kd, upd.tuning_active);
+                    xSemaphoreGive(printMutex);
+                }
             }
-            g_tuning_active = upd.tuning_active;                         // 0/1 상태 갱신
+            g_tuning_active = upd.tuning_active;
         }
 
-        // 실제 경과 시간 dt_real 계산
         XTime time_now;
         XTime_GetTime(&time_now);
         uint64_t dt_count = (time_now - time_last);
         time_last = time_now;
         float dt_real = (float)dt_count / (float)COUNTS_PER_SECOND;
-        if (dt_real < 0.010f) dt_real = 0.010f;    // dt 클램핑 하한(10ms)
-        if (dt_real > 0.030f) dt_real = 0.030f;    // dt 클램핑 상한(30ms)
+        if (dt_real < 0.010f) dt_real = 0.010f;
+        if (dt_real > 0.030f) dt_real = 0.030f;
 
         // printf("dt_real : %.4f\r\n", dt_real);
 
-        // 받은 데이터 있으면 갱신, 없으면 직전값 유지
         if (xQueueReceive(xControlQueue, &rx_from_queue, 0) == pdTRUE) {
-            last_rx = rx_from_queue;
+            last_rx = rx_from_queue;	// 최신 데이터 갱신
+            no_data_watchdog = 0;    	// 카운터 초기화
+        }else {
+            // Rx가 느려서 데이터 수신 실패할 경우
+            no_data_watchdog++;      // 카운터 증가
         }
 
-        // 수신 데이터를 지역 변수에 할당 (last_rx 기준)
-        x = last_rx.img_x;
-        y = last_rx.img_y;
-        dist = last_rx.distance;
-        cur_yaw = last_rx.yaw_rate;
-        cur_pitch = last_rx.pitch_rate;
-        pitch_fin_deg_rx = last_rx.pitch_wing_deq;
-        yaw_fin_deg_rx = last_rx.yaw_wing_deq;
-        sim_state = last_rx.sim_state;
+		//  Failsafe -> 0.1초 이상 데이터가 안 오는 경우 비행 방향을 유지
+		if (no_data_watchdog > MAX_NO_DATA_TICKS) {
+			x = 0; y = 0;
+		} else {
+			// 정상 제어 (Rx가 조금 늦어도 last_rx 값으로 부드럽게 제어)
+	        x = last_rx.img_x;
+	        y = last_rx.img_y;
+	        dist = last_rx.distance;
+	        cur_yaw = last_rx.yaw_rate;
+	        cur_pitch = last_rx.pitch_rate;
+	        pitch_fin_deg_rx = last_rx.pitch_wing_deq;
+	        yaw_fin_deg_rx = last_rx.yaw_wing_deq;
+	        sim_state = last_rx.sim_state;
+		}
 
-//        // rx_task로 부터 받은 데이터를 출력(뮤텍스로 보호)
-//        if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
-//        	printf("[Control_task]x: %.4f y: %.4f dist: %.4f pitch: %.4f yaw: %.4f, PW:%.4f, YW:%.4f, sim_state: %d \r\n\n",
-//        			x, y, dist, cur_pitch, cur_yaw, pitch_fin_deg_rx, yaw_fin_deg_rx, sim_state);
-//        	xSemaphoreGive(printMutex);
-//        }
+        // 동체 회전 데이터, rx_task에서 p,y 값 파싱
+        cur_mis_pitch = last_rx.p;
+        cur_mis_yaw   = last_rx.y;
 
-        // 시뮬레이션 종료 시 누적오차 초기화
         if(sim_state == 0){
             pid_pitch.integral = 0;
             pid_yaw.integral = 0;
         }
 
-        // printf("pid_pitch.integral: %.4f, pid_yaw.integral: %.4f\r\n", pid_pitch.integral, pid_yaw.integral);
-
-        // IBVS 연산 함수 호출 -> Pitch, Yaw 방향 목표 각속도를 velocity_out 배열에 저장
+        // ibvs 연산
         ibvs_calculate(x, y, dist, velocity_out);
 
-        // Pitch 방향 목표 각속도: velocity_out[3], Yaw 방향 목표 각속도: velocity_out[4]
         target_pitch = velocity_out[3];
         target_yaw   = velocity_out[4];
 
-        // 데드존 적용 : 오차가 허용 범위 내면, 목표 각속도 명령을 0으로 설정하여 움직임 정지
         if (fabsf(x) < YAW_PITCH_TOLERANCE) {
             target_yaw = 0.0f;
-            pid_yaw.integral = 0; // 적분 안티 와인딩 : 목표 도달 이 후 미세 제어 시 오버슈트방지를 위해 누적오차 초기화
+            pid_yaw.integral = 0;
         }
-
         if (fabsf(y) < YAW_PITCH_TOLERANCE) {
             target_pitch = 0.0f;
-            pid_pitch.integral = 0; // 목표 도달 이 후 미세 제어 시 오버슈트방지를 위해 누적오차 초기화
+            pid_pitch.integral = 0;
         }
 
-//      // 목표 각속도 출력
-//      if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
-//          printf("[Control_task]Target pitch: %.4f, Target yaw: %.4f\r\n", velocity_out[3], velocity_out[4]);
-//          xSemaphoreGive(printMutex);
-//      }
-
-        // 동체 각속도 에러(목표 각속도 - 현재 각속도) PID 입력 후 날개 각도 제어량 출력
         if(target_pitch != 0){
-            // printf("[Pitch PID]\n");
-            pitch_fin_deg = pid_calculation(&pid_pitch, target_pitch, cur_pitch, dt_real);		// pitch 방향 날개 각도 제어량
-        }
-        else{
+            pitch_fin_deg = pid_calculation(&pid_pitch, target_pitch, cur_pitch, dt_real);
+        } else {
             pitch_fin_deg = 0;
         }
         if(target_yaw != 0){
-            // printf("[Yaw PID]\n");
-            yaw_fin_deg = pid_calculation(&pid_yaw, target_yaw, cur_yaw, dt_real);				// yaw 방향 날개 각도 제어량
-        }
-        else{
+            yaw_fin_deg = pid_calculation(&pid_yaw, target_yaw, cur_yaw, dt_real);
+        } else {
             yaw_fin_deg = 0;
         }
 
-        // 최종 날개 제어각을 큐에 넣음
+        // 모터로 명령 송신
+        if (xAngleQueue) {
+            ServoCommand_t cmd;
+
+            // 모터 0-3 (날개)
+            cmd.motor_id = 0; cmd.angle = -pitch_fin_deg; xQueueSend(xAngleQueue, &cmd, 0);
+            cmd.motor_id = 1; cmd.angle =  pitch_fin_deg; xQueueSend(xAngleQueue, &cmd, 0);
+            cmd.motor_id = 2; cmd.angle =  yaw_fin_deg;  xQueueSend(xAngleQueue, &cmd, 0);
+            cmd.motor_id = 3; cmd.angle = -yaw_fin_deg;  xQueueSend(xAngleQueue, &cmd, 0);
+
+            // 모터 4-5 (동체)
+            cmd.motor_id = 4; cmd.angle = -cur_mis_pitch; xQueueSend(xAngleQueue, &cmd, 0);
+            cmd.motor_id = 5; cmd.angle =  cur_mis_yaw;   xQueueSend(xAngleQueue, &cmd, 0);
+
+//            // 송신 로그
+//            if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
+//                printf("[control] pitch_cmd=%.2f yaw_cmd=%.2f (sent to motors)\r\n",
+//                       pitch_fin_deg, yaw_fin_deg);
+//                xSemaphoreGive(printMutex);
+//            }
+        }
+
+        // 최종 날개 제어각, 시뮬레이션 수행 상태를 큐에 넣음
         tx_to_queue.pitch_fin_deg = pitch_fin_deg;
         tx_to_queue.yaw_fin_deg	= yaw_fin_deg;
+        tx_to_queue.target_pitch = target_pitch;
+        tx_to_queue.target_yaw   = target_yaw;
         tx_to_queue.sim_state = sim_state;
 
-        // 큐로 제어 데이터 push (큐 길이 1)
-        xQueueSend(xControlOutQueue, &tx_to_queue, 0);
-        // xQueueOverwrite(xControlOutQueue, &tx_to_queue);
+        // 큐로 제어 데이터 push
+        xQueueOverwrite(xControlOutQueue, &tx_to_queue);
     }
 }
