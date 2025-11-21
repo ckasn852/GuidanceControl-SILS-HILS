@@ -13,6 +13,10 @@
 #include "queue.h"
 #include "../control/pid_tuning_mode.h"
 
+// 태스크 시간 측정
+#include "xtime_l.h"
+#include "../sys_stat/system_stats.h"
+
 // main.c 에 정의된 뮤텍스 참조
 extern SemaphoreHandle_t printMutex;
 
@@ -23,6 +27,9 @@ int sim_state = 0;                       // 시뮬레이션 상태
 
 void rx_task()
 {
+    // 태스크 수행시간 측정용 변수
+    XTime tStart, tEnd;
+
     // 제어 데이터
     control_data rx_from_unreal;
 
@@ -36,7 +43,6 @@ void rx_task()
     }
 
     // Non-blocking 모드 설정 (LwIP 방식인 ioctlsocket 사용)
-    // 1 = Non-blocking, 0 = Blocking
     u32_t mode = 1;
     ioctlsocket(udp_sock, FIONBIO, &mode);
 
@@ -50,23 +56,22 @@ void rx_task()
         while (1) {
             n = recvfrom(udp_sock, recv_buffer, sizeof(recv_buffer) - 1, 0,
                          (struct sockaddr*)&client_addr, &client_addr_len);
-
             if (n > 0) {
-                // 데이터를 받음 -> 계속 루프를 돌며 다음 데이터 확인 (덮어쓰기)
                 last_packet_len = n;
                 got_data = true;
             } else {
-                // 수신 데이터 없으면 루프 탈출
                 break;
             }
         }
 
         // 데이터가 하나도 안 왔으면(타임아웃/데이터 없음) 다음 주기로
         if (!got_data) {
-            // 수신 데이터 없을 때 짧게 양보
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
+
+        /* UDP 수신 태스크 실행 시간 측정 시작*/
+        XTime_GetTime(&tStart);
 
         recv_buffer[last_packet_len] = '\0';
         memset(&rx_from_unreal, 0, sizeof(rx_from_unreal));
@@ -125,5 +130,9 @@ void rx_task()
 
         // xQueueOverwrite 사용 (항상 최신 데이터 유지)
         xQueueOverwrite(xControlQueue, &rx_from_unreal);
+
+        /* 실행 시간 측정 종료 */
+        XTime_GetTime(&tEnd);
+        g_time_rx_us = (float)((double)(tEnd - tStart) / (COUNTS_PER_SECOND / 1000000.0));
     }
 }

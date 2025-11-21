@@ -14,7 +14,7 @@
 #define CENTER_Y 0.0f
 #endif
 #ifndef LAMBDA
-#define LAMBDA 100.0f
+#define LAMBDA 10.0f
 #endif
 
 // NaN/Inf üũ
