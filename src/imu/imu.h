@@ -3,8 +3,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "FreeRTOS.h"
-#include "queue.h"
 
 // ===== IMU Data Structure =====
 typedef struct {
@@ -20,8 +18,9 @@ typedef struct {
 
 // ===== Public API =====
 void IMU_Init(void);
-void IMU_StartTask(void);
-void IMUTask(void *pv);
-QueueHandle_t IMU_GetQueue(void);
+// [수정] 태스크 대신 주기적 업데이트 함수로 변경
+void IMU_Update(float dt);
+// [추가] 최신 데이터 반환 함수
+IMUData_t IMU_GetData(void);
 
 #endif

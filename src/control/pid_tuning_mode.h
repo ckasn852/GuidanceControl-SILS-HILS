@@ -1,4 +1,4 @@
-// [MOD] pid_tuning_mode.h
+// pid_tuning_mode.h
 #ifndef PID_TUNING_MODE_H
 #define PID_TUNING_MODE_H
 

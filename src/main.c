@@ -5,9 +5,9 @@
 #include "lwip/inet.h"
 #include "rx/rx_task.h"
 #include "tx/tx_task.h"
-#include "imu/imu.h"
 #include "control/control_task.h"
 #include "network_init/network_bootstrap.h"
+#include "req/req_task.h"
 
 // 하드 타이머/GIC 헤더
 #include "xparameters.h"
@@ -22,8 +22,11 @@
 #include "control/control_queue.h"
 
 // 모터/튜닝 헤더 추가
-#include "motor/motor_driver_task.h"
+#include "hw_interface/hw_interface_task.h"
 #include "control/pid_tuning_mode.h"
+#include "control/control_data.h"
+#include "control/control_output.h"
+#include "imu/imu.h"
 
 // 태스크 스택 사이즈
 #define NETINIT_STACKSIZE  1024
@@ -31,14 +34,14 @@
 #define CONTROL_STACKSIZE  1024
 #define TX_STACKSIZE       1024
 #define MOTOR_STACKSIZE    1024
-#define IMU_STACKSIZE       1024
+#define REQ_STACKSIZE      1024
 
-#define PRIO_NETINIT (tskIDLE_PRIORITY+4)
-#define PRIO_RX      (tskIDLE_PRIORITY+2)
+#define PRIO_NETINIT (tskIDLE_PRIORITY+4)	// Zynq 보드 부팅 시 최초 1회만 실행
+#define PRIO_RX      (tskIDLE_PRIORITY+2)	//
 #define PRIO_CONTROL (tskIDLE_PRIORITY+5)
+#define PRIO_REQ     (tskIDLE_PRIORITY+6)   // Req가 가장 높은 우선순위 (타이머 즉시 반응)
 #define PRIO_TX      (tskIDLE_PRIORITY+2)
-#define PRIO_MOTOR   (tskIDLE_PRIORITY+2)
-#define PRIO_IMU      (tskIDLE_PRIORITY+3) //상황에 맞춰 수정
+#define PRIO_HW_IF   (tskIDLE_PRIORITY+2)
 
 // IRQ ID/디바이스 ID
 #define TTC_DEV_ID      XPAR_XTTCPS_0_DEVICE_ID
@@ -46,23 +49,26 @@
 
 SemaphoreHandle_t networkInitMutex;
 SemaphoreHandle_t printMutex;
+SemaphoreHandle_t socketMutex; // 소켓 뮤텍스
 
 // 외부에서 참조하는 큐 전역 생성
-QueueHandle_t xAngleQueue   = NULL;
-QueueHandle_t xAngleFbQueue = NULL;
-QueueHandle_t xPidUpdateQueue = NULL;
+ QueueHandle_t xAngleQueue      = NULL;
+ QueueHandle_t xAngleFbQueue    = NULL;
+QueueHandle_t xPidUpdateQueue  = NULL;      // PID 튜닝용 큐는 그대로 사용
 
 // 전역 인스턴스/핸들
 static XTtcPs  g_Ttc;
 TaskHandle_t gControlTaskHandle = NULL;
-static volatile uint32_t g_isr_cnt = 0;
+TaskHandle_t gReqTaskHandle = NULL; // 요청 태스크 핸들
+// ISR 카운터는 전역으로 유지, control_task.c에서 extern으로 사용
+volatile uint32_t g_isr_cnt = 0;
 
 // FreeRTOS 인터럽트 설치 API 프로토타입
 BaseType_t xPortInstallInterruptHandler(uint8_t ucInterruptID, Xil_InterruptHandler pxHandler, void *pvCallBackRef);
 void vPortEnableInterrupt(uint8_t ucInterruptID);
 
 
-// TTC ISR: 20ms마다 Control Task 깨움
+// TTC ISR: 10ms(100Hz)마다 호출, 짝수/홀수 틱으로 Req/Control 교대 기상
 static void Ttc_Isr(void *cb)
 {
     XTtcPs *Ttc = (XTtcPs*)cb;
@@ -72,8 +78,19 @@ static void Ttc_Isr(void *cb)
 
     BaseType_t xHigherWoken = pdFALSE;
 
-    // Control Task에게 알림(Notify) 전송 -> Task 깨움
-    vTaskNotifyGiveFromISR(gControlTaskHandle, &xHigherWoken);
+    // 10ms(100Hz) 타이머 틱 기준으로 Req/Control를 교대로 깨움
+    static uint32_t tick_10ms = 0;        // 10ms 틱 카운터
+    tick_10ms++;                          // 인터럽트마다 1씩 증가 (10ms 단위)
+
+    if ((tick_10ms & 1U) == 0U) {         // 짝수 틱: 0,20,40,... ms (Req_task)
+        if (gReqTaskHandle != NULL) {
+            vTaskNotifyGiveFromISR(gReqTaskHandle, &xHigherWoken);
+        }
+    } else {                              // 홀수 틱: 10,30,50,... ms (Control_task)
+        if (gControlTaskHandle != NULL) {
+            vTaskNotifyGiveFromISR(gControlTaskHandle, &xHigherWoken);
+        }
+    }
 
     // Context Switching 요청 (Task 전환)
     portYIELD_FROM_ISR(xHigherWoken);
@@ -99,7 +116,9 @@ static int ttc_start_50hz(void)
     u8        prescaler;
 
     // 50Hz (20ms) 주기 계산
-    XTtcPs_CalcIntervalFromFreq(&g_Ttc, 50, &interval, &prescaler);
+    // XTtcPs_CalcIntervalFromFreq(&g_Ttc, 50, &interval, &prescaler);
+    // 실제로는 100Hz(10ms) 주기로 설정하여 Req/Control 위상 분리
+    XTtcPs_CalcIntervalFromFreq(&g_Ttc, 100, &interval, &prescaler);
     XTtcPs_SetPrescaler(&g_Ttc, prescaler);
     XTtcPs_SetInterval(&g_Ttc, interval);
 
@@ -143,23 +162,24 @@ int main()
 {
     networkInitMutex = xSemaphoreCreateMutex();     // 네트워크 초기화 뮤텍스 생성
     printMutex = xSemaphoreCreateMutex();           // 프린트 뮤텍스 생성
-
-    IMU_Init();
+    socketMutex = xSemaphoreCreateMutex();          // 소켓 뮤텍스 생성
 
     // 제어 데이터 큐 초기화 (최신 데이터만 사용하기 위해 길이 1 설정)
     control_queue_init();
 
     // 큐 생성
-    xAngleQueue     = xQueueCreate(1, sizeof(ServoCommand_t));
-    xAngleFbQueue   = xQueueCreate(1, sizeof(ServoFeedback_t));
-    xPidUpdateQueue = xQueueCreate(4, sizeof(PIDUpdate_t));
+    xAngleQueue      = xQueueCreate(1, sizeof(ServoCommand_t));
+    xAngleFbQueue    = xQueueCreate(1, sizeof(ServoFeedback_t));
+    xPidUpdateQueue  = xQueueCreate(4, sizeof(PIDUpdate_t));
 
     // 큐 생성 결과 출력
     if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
-        printf("[main] xAngleQueue=%p xAngleFbQueue=%p xPidUpdateQueue=%p\r\n",
-               (void*)xAngleQueue, (void*)xAngleFbQueue, (void*)xPidUpdateQueue);
+        printf("[main] Queues Created.\r\n");
         xSemaphoreGive(printMutex);
     }
+
+    // IMU 초기화
+    IMU_Init();
 
     // 네트워크 초기화 태스크 생성
     xTaskCreate(network_init_task, "network_init_task", NETINIT_STACKSIZE, NULL, PRIO_NETINIT, NULL);
@@ -167,20 +187,19 @@ int main()
     // 수신 태스크 생성
     xTaskCreate(rx_task, "rx_task", RX_STACKSIZE, NULL, PRIO_RX, NULL);
 
+    // 요청 태스크 생성
+    xTaskCreate(req_task, "req_task", REQ_STACKSIZE, NULL, PRIO_REQ, &gReqTaskHandle);
+
     // 제어 태스크 생성 (핸들 저장 -> TTC ISR에서 사용)
     xTaskCreate(control_task, "control_task", CONTROL_STACKSIZE, NULL, PRIO_CONTROL, &gControlTaskHandle);
 
-    // 모터 드라이버 태스크 생성
-    xTaskCreate(vMotorDriverTask, "motor_driver_task", MOTOR_STACKSIZE, NULL, PRIO_MOTOR, NULL);
+     // 하드웨어 인터페이스 태스크 생성 (기존 motor_driver_task)
+     xTaskCreate(vHwInterfaceTask, "hw_interface_task", MOTOR_STACKSIZE, NULL, PRIO_HW_IF, NULL);  // [MOD] HwInterface_ApplyCommands() 함수로 대체
 
-    // 송신 태스크 생성
-    xTaskCreate(tx_task, "tx_task", TX_STACKSIZE, NULL, PRIO_TX, NULL);
+     // 송신 태스크 생성
+     xTaskCreate(tx_task, "tx_task", TX_STACKSIZE, NULL, PRIO_TX, NULL);                           // [MOD] Tx_SendToUnreal() 함수로 대체
 
-    //IMU 태스크 생성
-    xTaskCreate(IMUTask, "IMU", 2048, IMU_STACKSIZE, PRIO_IMU, NULL);
-
-    // 하드 타이머(50Hz) 시작은 스케줄러 시작 '직전'에 수행
-    // FreeRTOS 핸들러 등록을 위해 task 생성 후, scheduler 시작 전에 호출
+    // 하드 타이머 시작은 스케줄러 시작 '직전'에 수행
     int rc = ttc_start_50hz();
     if (rc != 0) {
         if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
@@ -188,7 +207,8 @@ int main()
             xSemaphoreGive(printMutex);
         }
     } else {
-        printf("[main] TTC 50Hz Started Successfully.\r\n");
+        // 실제 주파수(100Hz)로 로그 문구만 보정
+        printf("[main] TTC 100Hz Started Successfully.\r\n");
     }
 
     // scheduling 시작
