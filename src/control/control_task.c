@@ -14,7 +14,7 @@
 // 태스크 시간 측정
 #include "xtime_l.h"
 #include "../sys_stat/system_stats.h"
-#include "task.h"                  // xTaskGetTickCount 사용을 위해 추가
+#include "task.h"                               // xTaskGetTickCount 사용을 위해 추가
 
 // main.c 에 정의된 뮤텍스 참조
 extern SemaphoreHandle_t printMutex;
@@ -34,11 +34,11 @@ void control_task(){
     PID_t pid_yaw;
     PID_t pid_pitch;
 
-    float velocity_out[6];                          // 목표 각속도 벡터
-    float x, y, dist, cur_pitch, cur_yaw;           // 타겟 x,y 좌표(오차), 거리, 동체의 현재 Pitch, Yaw 각속도
-    float target_pitch, target_yaw;                 // Pitch, Yaw 방향 목표 각속도
-    float pitch_fin_deg, yaw_fin_deg;               // Pitch, Yaw 방향 목표 날개 제어량
-    float pitch_fin_deg_rx, yaw_fin_deg_rx;         // Pitch, Yaw 날개 현재 각도
+    float velocity_out[6];                              // 목표 각속도 벡터
+    float x, y, dist, cur_pitch, cur_yaw;               // 타겟 x,y 좌표(오차), 거리, 동체의 현재 Pitch, Yaw 각속도
+    float target_pitch, target_yaw;                     // Pitch, Yaw 방향 목표 각속도
+    float pitch_fin_deg, yaw_fin_deg;                   // Pitch, Yaw 방향 목표 날개 제어량
+    float pitch_fin_deg_rx, yaw_fin_deg_rx;             // Pitch, Yaw 날개 현재 각도
     int sim_state = 0;
 
     // 동체 회전 피드 전달용
@@ -46,8 +46,10 @@ void control_task(){
     float cur_mis_yaw   = 0.0f;
 
     // PID Gain Pitch, Yaw 각각 적용
-    pid_init(&pid_pitch, 30.0f, 15.0f, 5.0f, 40.0f, -40.0f);  // 20ms 최적 PID 설정
-    pid_init(&pid_yaw,   30.0f, 15.0f, 5.0f, 40.0f, -40.0f);
+//    pid_init(&pid_pitch, 30.0f, 15.0f, 5.0f, 40.0f, -40.0f);  // 20ms 최적 PID 설정
+//    pid_init(&pid_yaw,   30.0f, 15.0f, 5.0f, 40.0f, -40.0f);
+    pid_init(&pid_pitch, 100.0f, 0.0f, 0.1f, 40.0f, -40.0f);
+    pid_init(&pid_yaw,   100.0f, 0.0f, 0.1f, 40.0f, -40.0f);
 
     XTime time_last;
     XTime_GetTime(&time_last);
@@ -56,8 +58,6 @@ void control_task(){
     XTime tStart, tEnd;
 
     control_data last_rx = {0};
-
-    uint32_t tick_cnt = 0; // 디버그용
 
     // 현재 튜닝 플래그(기본: 미적용=1)
     static int g_tuning_active = 1;
@@ -69,6 +69,8 @@ void control_task(){
     // 주기 확인용 Tick 기록 변수
     static TickType_t lastTick = 0;
     static uint32_t   loopCnt  = 0;
+    // 집계 로그 1회 출력 여부 플래그
+    static BaseType_t statsPrinted = pdFALSE;
 
     while(1)
     {
@@ -82,26 +84,9 @@ void control_task(){
                 TickType_t diffTick = nowTick - lastTick;
                 uint32_t diffMs = diffTick * portTICK_PERIOD_MS;
                 loopCnt++;
-
-                // 너무 자주 찍히면 방해되니, 예: 50번마다(대략 1초) 한 번 출력
-                if ((loopCnt % 50u) == 0u) {
-                    if (xSemaphoreTake(printMutex, 0) == pdTRUE) {
-                        printf("[control] loop=%lu, period=%lu ms\r\n",
-                               (unsigned long)loopCnt,
-                               (unsigned long)diffMs);
-                        xSemaphoreGive(printMutex);
-                    }
-                }
             }
             lastTick = nowTick;
         }
-
-//        if ((++tick_cnt % 500) == 0) { // 10초마다(20ms*500) 진단 출력
-//            if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
-//                printf("[control] woke 500 times, isr_cnt=%lu\r\n", (unsigned long)g_isr_cnt);
-//                xSemaphoreGive(printMutex);
-//            }
-//        }
 
         // 언리얼 PID 튜닝 업데이트 수신
         PIDUpdate_t upd;
@@ -119,6 +104,7 @@ void control_task(){
             g_tuning_active = upd.tuning_active;
         }
 
+        // dt 측정용 변수
         XTime time_now;
         XTime_GetTime(&time_now);
         uint64_t dt_count = (time_now - time_last);
@@ -127,18 +113,27 @@ void control_task(){
         if (dt_real < 0.010f) dt_real = 0.010f;
         if (dt_real > 0.030f) dt_real = 0.030f;
 
-
-        /* [MOD] 데이터 수신 로직: 이번 주기에 새 데이터가 있으면 즉시 사용, 없으면 last_rx 유지 */
+        /* 데이터 수신 로직: 이번 주기에 새 데이터가 있으면 즉시 사용, 없으면 last_rx 유지 */
         BaseType_t rx_status = xQueueReceive(xControlQueue, &rx_from_queue, 0);
 
         /* WCET 측정 시작 (순수 연산 시작점) */
         XTime_GetTime(&tStart);
 
+        //  Rx -> Control 데이터 지연 시간 계산
+        // req 송신 시각 + RTT = rx 수신 완료 시각(추정)
+        // 현재(Control 시작) - rx 수신 완료 시각 = 지연 시간
+        double rtt_counts = (double)g_last_rtt_us * (COUNTS_PER_SECOND / 1000000.0);
+        XTime tRxFinishEstimated = g_req_send_timestamp + (XTime)rtt_counts;
+        double rx_to_ctrl_delay = (double)(tStart - tRxFinishEstimated) / (COUNTS_PER_SECOND / 1000000.0);
+
+        // 음수 방지 (타이밍 오차 등으로 인한)
+        if (rx_to_ctrl_delay < 0.0) rx_to_ctrl_delay = 0.0;
+
         if (rx_status == pdTRUE) {
             last_rx = rx_from_queue;    // 최신 데이터 갱신
             no_data_watchdog = 0;       // 카운터 초기화
         } else {
-            // [실패] 이번 주기에 새 데이터 없음
+            // 이번 주기에 새 데이터 없음
             no_data_watchdog++;         // 카운터 증가
         }
 
@@ -155,7 +150,6 @@ void control_task(){
             pitch_fin_deg_rx = last_rx.pitch_wing_deq;
             yaw_fin_deg_rx = last_rx.yaw_wing_deq;
             sim_state = last_rx.sim_state;
-
             cur_mis_pitch = last_rx.p;
             cur_mis_yaw   = last_rx.y;
         }
@@ -167,10 +161,10 @@ void control_task(){
 
         // ibvs 연산
         ibvs_calculate(x, y, dist, velocity_out);
-
         target_pitch = velocity_out[3];
         target_yaw   = velocity_out[4];
 
+        // 데드존 적용
         if (fabsf(x) < YAW_PITCH_TOLERANCE) {
             target_yaw = 0.0f;
             pid_yaw.integral = 0;
@@ -213,23 +207,24 @@ void control_task(){
         tx_to_queue.target_yaw    = target_yaw;
         tx_to_queue.sim_state     = sim_state;
 
+        // 시간 측정 데이터 패킹
+        tx_to_queue.rx_to_ctrl_delay_us = (float)rx_to_ctrl_delay; // 3. Rx->Ctrl 지연
+        tx_to_queue.ctrl_start_time = tStart;                      // 4. Ctrl 시작 시간 (Tx에서 사용)
+
         // 큐로 제어 데이터 push
         xQueueOverwrite(xControlOutQueue, &tx_to_queue);
 
-        /* WCET 측정 종료 및 기록 */
+        /* WCET / 평균 시간 측정 종료 및 기록 */
         XTime_GetTime(&tEnd);
+        double current_exec_us = (double)(tEnd - tStart) / (COUNTS_PER_SECOND / 1000000.0);
 
-        g_time_ctrl_us = (float)((double)(tEnd - tStart) / (COUNTS_PER_SECOND / 1000000.0));
-        double current_exec_us = (double)g_time_ctrl_us;
+        g_time_ctrl_us = (float)current_exec_us;
+        g_sum_ctrl_us  += current_exec_us;
+        g_cnt_ctrl++;
+        g_avg_ctrl_us = (g_cnt_ctrl > 0) ? (g_sum_ctrl_us / g_cnt_ctrl) : 0.0;
 
-//        // Max Hold (최악 실행 시간 갱신)
-//        if (current_exec_us > g_wcet_control_us) {
-//            g_wcet_control_us = current_exec_us;
-//            // 신기록 로그 출력 (옵션)
-//             if (xSemaphoreTake(printMutex, 0) == pdTRUE) {
-//                 printf("[WCET NEW MAX] Control: %.2f us\r\n", g_wcet_control_us);
-//                 xSemaphoreGive(printMutex);
-//            }
-//        }
+        if (current_exec_us > g_wcet_ctrl_us) {
+            g_wcet_ctrl_us = current_exec_us;
+        }
     }
 }

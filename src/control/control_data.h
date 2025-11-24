@@ -1,7 +1,7 @@
 #ifndef CONTROL_DATA_H
 #define CONTROL_DATA_H
 
-// [기존] Rx 수신 데이터 (언리얼 -> Zynq)
+// Rx 수신 데이터 (언리얼 -> Zynq)
 typedef struct {
     float pitch_rate;
     float yaw_rate;

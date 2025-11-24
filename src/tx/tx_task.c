@@ -1,3 +1,5 @@
+// tx_task.c
+
 #include "lwip/sockets.h"
 #include "../network_init/network_bootstrap.h"
 #include "tx_task.h"
@@ -13,7 +15,7 @@
 
 // 태스크 시간 측정
 #include "xtime_l.h"
-#include "../sys_stat/system_stats.h"
+#include "../sys_stat/system_stats.h"   // [ADD] Tx(Build/Send) 통계 변수 사용
 
 // 디버깅 뮤텍스, 소켓 뮤텍스
 extern SemaphoreHandle_t printMutex;
@@ -23,8 +25,8 @@ extern SemaphoreHandle_t socketMutex;
 #include "../hw_interface/hw_interface_task.h"
 
 void tx_task(){
-    // 태스크 수행시간 측정용 변수
-    XTime tStart, tEnd;
+    // 송신 구간별 시간 측정을 위한 타이머
+    XTime tSendStart,  tSendEnd;
 
     control_output sim_data;       // 언리얼로 보내는 가상 데이터
     real_sensor_data real_data;    // 하드웨어로 보내는 센서 데이터
@@ -34,106 +36,87 @@ void tx_task(){
 
     int data_len = 0;
     char send_buffer[TX_BUFFER_LEN];
-    // char* p = send_buffer; // [삭제] 사용하지 않는 변수 경고 해결
-
-    uint32_t current_time_ms = 0;
 
     // UDP 송신 타임아웃(주기 침범 방지, 2ms)
     struct timeval stv = { .tv_sec = 0, .tv_usec = 2000 };
     setsockopt(udp_sock, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
 
+    // 로그 출력 주기 제어용 카운터
+    static uint32_t print_cnt = 0;
+
     while(1)
     {
         // Control 태스크 대기
-        if (xQueueReceive(xControlOutQueue, &sim_data, portMAX_DELAY) != pdTRUE) continue;
-
-        // Hardware 태스크 확인 (Non-blocking)
-        if (xQueueReceive(xRealDataQueue, &real_data, 0) == pdTRUE) {
-             // 최신값 수신
+        if (xQueueReceive(xControlOutQueue, &sim_data, portMAX_DELAY) != pdTRUE) {
+            continue;
         }
 
         /* 제어량 최종 송신 (시뮬레이션 진행중일 때만 송신) */
         if(sim_data.sim_state == 0){
-        	/* 시간 측정 시작 (패킷 생성 및 송신) */
-        	XTime_GetTime(&tStart);
 
-        	// 큐에서 데이터를 받자마자 현재 시간을 ms 단위로 측정 (Tick 수 * Tick 당 ms)
-            current_time_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            /* =======================
+             * 2) sendto 송신 시간 측정 (여기서 데이터를 보내는 시점으로 간주)
+             * ======================= */
+            XTime_GetTime(&tSendStart);
 
-            // 태스크 전체 실행 시간 합산
-            float total_exec_time = g_time_rx_us + g_time_ctrl_us + g_time_hw_us + g_time_tx_us;
+            // control_task 처리 후 언리얼 송신까지 소요 시간 계산
+            // (Tx Send 시작 시각 - Control Start 시각)
+            double delay_ctrl_to_tx = (double)(tSendStart - sim_data.ctrl_start_time) / (COUNTS_PER_SECOND / 1000000.0);
+            if (delay_ctrl_to_tx < 0) delay_ctrl_to_tx = 0.0;
 
-            // [수정] 송신 포맷에 실제 데이터 추가
+
+            //  데이터 포맷 변경
+            // 1. Pitch/Yaw Fin (제어량)
+            // 2. Target Pitch/Yaw (목표 각속도)
+            // 3. Req 간격 / Req->Rx(RTT) / Rx->Ctrl / Ctrl->Tx (시간 데이터 4개)
             data_len = snprintf(send_buffer, sizeof(send_buffer),
-                    "Pitch_Fin_Control_Amount: %.4f Yaw_Fin_Control_Amount: %.4f "	// Pitch,Yaw 날개 각도 제어량
-                    "target_pitch: %.4f target_yaw: %.4f "							// Pitch,Yaw 목표 동체 각속도
-                    "Pitch_Motor_Feedback: %.4f Yaw_Motor_Feedback: %.4f "			// Pitch,Yaw 날개 각속도 현재 상태
-                    "Send_Time: %lu",												// 언리얼로 데이터를 보낸 시간
+                    "Pitch_Fin: %.4f Yaw_Fin: %.4f "
+                    "Tgt_Pitch: %.4f Tgt_Yaw: %.4f "
+                    "Req_Int: %.2f RTT: %.2f Rx2Ctrl: %.2f Ctrl2Tx: %.2f",
                     sim_data.pitch_fin_deg, sim_data.yaw_fin_deg,
                     sim_data.target_pitch, sim_data.target_yaw,
-                    real_data.real_motor_angle[0], real_data.real_motor_angle[2],
-                    current_time_ms);
-
-//            // [수정] 송신 포맷에 실제 데이터 추가
-//            data_len = snprintf(send_buffer, sizeof(send_buffer),
-//                    "Pitch_Fin_Control_Amount: %.4f Yaw_Fin_Control_Amount: %.4f "	// Pitch,Yaw 날개 각도 제어량
-//                    "target_pitch: %.4f target_yaw: %.4f "							// Pitch,Yaw 목표 동체 각속도
-//                    "Pitch_Motor_Feedback: %.4f Yaw_Motor_Feedback: %.4f "			// Pitch,Yaw 날개 각속도 현재 상태
-//                    "RealIMU_Pitch: %.4f RealIMU_Yaw: %.4f " 						// Pitch,Yaw IMU 데이터
-//                    "Send_Time: %lu"												// 언리얼로 데이터를 보낸 시간
-//					  "Task_Execution_time: %.1f",									// 태스크 총 수행 시간
-//                    sim_data.pitch_fin_deg, sim_data.yaw_fin_deg,
-//                    sim_data.target_pitch, sim_data.target_yaw,
-//                    real_data.real_motor_angle[0], real_data.real_motor_angle[2],
-//                    real_data.real_imu_pitch, real_data.real_imu_yaw, 		// IMU 데이터
-//                    current_time_ms, total_exec_time);
+                    g_req_period_us,              // 1. req_task 송신 간격
+                    g_last_rtt_us,                // 2. req->rx (RTT)
+                    sim_data.rx_to_ctrl_delay_us, // 3. rx->control 소요 시간
+                    (float)delay_ctrl_to_tx       // 4. control->tx 소요 시간
+            );
 
             // 언리얼에 UDP 송신(소켓 뮤텍스 사용)
-			if (xSemaphoreTake(socketMutex, portMAX_DELAY) == pdTRUE) {
-				sendto(udp_sock, send_buffer, data_len, 0, (struct sockaddr*)&client_addr, client_addr_len);
-				xSemaphoreGive(socketMutex);
+            if (xSemaphoreTake(socketMutex, portMAX_DELAY) == pdTRUE) {
+                sendto(udp_sock, send_buffer, data_len, 0,
+                       (struct sockaddr*)&client_addr, client_addr_len);
+                xSemaphoreGive(socketMutex);
+            }
+
+            // 언리얼로 보낸 타임스탬프 출력(1초에 한 번씩)
+			print_cnt++;
+			if ((print_cnt % 50) == 0) {
+				if (xSemaphoreTake(printMutex, 0) == pdTRUE) {
+					printf("[TX] req_interval:%.1f req_recv_delta:%.1f rx_control_delay:%.1f control_to_unreal_delay:%.1f (us)\r\n",
+						   g_req_period_us,
+						   g_last_rtt_us,
+						   sim_data.rx_to_ctrl_delay_us,
+						   (float)delay_ctrl_to_tx
+					);
+					xSemaphoreGive(printMutex);
+				}
 			}
 
-//			if (xSemaphoreTake(printMutex, 0) == pdTRUE) {
-//				printf("[tx] ExecTime: %.1f us (SendTime: %lu)\r\n", total_exec_time, current_time_ms);
-//				xSemaphoreGive(printMutex);
-//			}
+            XTime_GetTime(&tSendEnd);
 
-//			// 언리얼에 송신한 전체 문자열 출력(뮤텍스로 보호)
-//			if (xSemaphoreTake(printMutex, 0) == pdTRUE) {
-//				printf("[tx] send -> %s\r\n", send_buffer);
-//				xSemaphoreGive(printMutex);
-//			}
+            double send_us =
+                (double)(tSendEnd - tSendStart) / (COUNTS_PER_SECOND / 1000000.0);
 
-//			// 1초에 한 번만 출력(50Hz * 50 = 1초)
-//			static int log_cnt = 0;
-//			log_cnt++;
-//
-//			// 언리얼에 송신한 전체 문자열 출력(뮤텍스로 보호)
-//			if (log_cnt >= 50) {
-//				log_cnt = 0;
-//				if (xSemaphoreTake(printMutex, 0) == pdTRUE) {
-//					printf("[tx] send -> %s\r\n", send_buffer);
-//					xSemaphoreGive(printMutex);
-//				}
-//			}
-
-//            // 1초에 한 번만 출력하도록 변경 (50Hz * 50 = 1초)
-//            static int log_cnt = 0;
-//            log_cnt++;
-//
-//            if (log_cnt >= 50) {
-//                log_cnt = 0;
-//                if (xSemaphoreTake(printMutex, 0) == pdTRUE) { // 0: 기다리지 않고 가능할 때만 출력
-//                     // 실수형 출력(%f)도 부하가 크므로 꼭 필요할 때만 사용
-//                     printf("[tx] ExecTime: %.1f us (SendTime: %lu)\r\n", total_exec_time, current_time_ms);
-//                     xSemaphoreGive(printMutex);
-//                }
-//            }
-
-            /* 시간 측정 종료 및 기록 */
-			XTime_GetTime(&tEnd);
-			g_time_tx_us = (float)((double)(tEnd - tStart) / (COUNTS_PER_SECOND / 1000000.0));
+            // Tx(Send) 통계 업데이트
+            g_time_tx_send_us = (float)send_us;
+            g_sum_tx_send_us  += send_us;
+            g_cnt_tx_send++;
+            g_avg_tx_send_us = (g_cnt_tx_send > 0)
+                               ? (g_sum_tx_send_us / g_cnt_tx_send)
+                               : 0.0;
+            if (send_us > g_wcet_tx_send_us) {
+                g_wcet_tx_send_us = send_us;
+            }
         }
     }
 }
