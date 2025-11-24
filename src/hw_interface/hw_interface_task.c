@@ -11,7 +11,7 @@
 
 // 태스크 시간 측정
 #include "xtime_l.h"
-#include "../sys_stat/system_stats.h"    // [ADD]
+#include "../sys_stat/system_stats.h"
 
 extern SemaphoreHandle_t printMutex;
 extern QueueHandle_t xRealDataQueue;
@@ -86,6 +86,8 @@ void vHwInterfaceTask(void *pvParameters)
     }
 
     ServoCommand_t received_cmd;
+
+    // [MOD] 송신용 구조체 변수 복구
     static real_sensor_data current_real_data = {0};
     IMUData_t imu_temp;
 
@@ -106,6 +108,7 @@ void vHwInterfaceTask(void *pvParameters)
                 Xil_Out32(TIMER_BASE_ADDRS[received_cmd.motor_id] + TLR1_OFFSET, pulse_counts);
 
                 // 실제 모터 피드백 읽기
+                // 읽기는 수행하되 구조체 저장 등은 선택적 (IMU 위주)
                 current_real_data.real_motor_angle[received_cmd.motor_id] =
                                 read_real_motor_angle(received_cmd.motor_id);
 
@@ -115,10 +118,12 @@ void vHwInterfaceTask(void *pvParameters)
                     imu_temp = IMU_GetData();
 
                     // Roll 데이터를 Pitch로 매핑 (센서 부착 방향 반영)
+                    // [MOD] IMU 데이터만 구조체에 담아 보냄
                     current_real_data.real_imu_pitch = imu_temp.angle_roll_deg;
                     current_real_data.real_imu_yaw   = imu_temp.angle_yaw_deg;
 
                     // Tx Task로 모든 하드웨어 데이터 전송 (최신 데이터 유지를 위해 Overwrite)
+                    // [MOD] 큐 송신 복구
                     if (xRealDataQueue) {
                         xQueueOverwrite(xRealDataQueue, &current_real_data);
                     }

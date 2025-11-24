@@ -11,18 +11,19 @@
 #include "../control/control_data.h"
 #include "../control/control_queue.h"
 #include "../control/control_output.h"
-#include "../control/control_output_hw.h"
+#include "../control/control_output_hw.h" // [MOD] 헤더 복구
 
 // 태스크 시간 측정
 #include "xtime_l.h"
-#include "../sys_stat/system_stats.h"   // [ADD] Tx(Build/Send) 통계 변수 사용
+#include "../sys_stat/system_stats.h"   // Tx(Build/Send) 통계 변수 사용
 
 // 디버깅 뮤텍스, 소켓 뮤텍스
 extern SemaphoreHandle_t printMutex;
 extern SemaphoreHandle_t socketMutex;
 
 // 모터 피드백 큐
-#include "../hw_interface/hw_interface_task.h"
+// #include "../hw_interface/hw_interface_task.h" // (기존 주석 유지)
+extern QueueHandle_t xRealDataQueue; // 큐 핸들 extern
 
 void tx_task(){
     // 송신 구간별 시간 측정을 위한 타이머
@@ -32,6 +33,7 @@ void tx_task(){
     real_sensor_data real_data;    // 하드웨어로 보내는 센서 데이터
 
     // 초기화
+    // [MOD] 초기화 복구
     memset(&real_data, 0, sizeof(real_data));
 
     int data_len = 0;
@@ -59,26 +61,40 @@ void tx_task(){
              * ======================= */
             XTime_GetTime(&tSendStart);
 
-            // control_task 처리 후 언리얼 송신까지 소요 시간 계산
-            // (Tx Send 시작 시각 - Control Start 시각)
-            double delay_ctrl_to_tx = (double)(tSendStart - sim_data.ctrl_start_time) / (COUNTS_PER_SECOND / 1000000.0);
-            if (delay_ctrl_to_tx < 0) delay_ctrl_to_tx = 0.0;
+            // IMU 데이터 수신 (Non-blocking)
+            if (xRealDataQueue != NULL) {
+                xQueueReceive(xRealDataQueue, &real_data, 0);
+            }
 
+            // Control Task가 처리 완료(ctrl_finish_time)한 시점부터
+            // Tx Task에서 sendto를 호출하기 전까지의 지연 시간 계산 // [MOD]
+            double delay_ctrl_to_tx = 0.0;                                     // [MOD]
+            if (sim_data.ctrl_finish_time != 0 &&                              // [MOD]
+                tSendStart > sim_data.ctrl_finish_time) {                      // [MOD]
+                delay_ctrl_to_tx =
+                    (double)(tSendStart - sim_data.ctrl_finish_time)          // [MOD]
+                    / (COUNTS_PER_SECOND / 1000000.0);                         // [MOD]
+            }
+            if (delay_ctrl_to_tx < 0) delay_ctrl_to_tx = 0.0;                  // [MOD]
 
             //  데이터 포맷 변경
             // 1. Pitch/Yaw Fin (제어량)
             // 2. Target Pitch/Yaw (목표 각속도)
-            // 3. Req 간격 / Req->Rx(RTT) / Rx->Ctrl / Ctrl->Tx (시간 데이터 4개)
+            // 3. Req 간격 / Req->Rx(RTT) / Control 처리 시간 / Control 종료~Tx 송신까지 지연
+            // 4. IMU Pitch/Yaw 추가
             data_len = snprintf(send_buffer, sizeof(send_buffer),
                     "Pitch_Fin: %.4f Yaw_Fin: %.4f "
                     "Tgt_Pitch: %.4f Tgt_Yaw: %.4f "
-                    "Req_Int: %.2f RTT: %.2f Rx2Ctrl: %.2f Ctrl2Tx: %.2f",
+                    "Req_Int: %.2f RTT: %.2f Ctrl_Proc: %.2f Ctrl2Tx: %.2f " // [MOD]
+                    "IMU_Pitch: %.2f IMU_Yaw: %.2f",                          // [MOD]
                     sim_data.pitch_fin_deg, sim_data.yaw_fin_deg,
                     sim_data.target_pitch, sim_data.target_yaw,
-                    g_req_period_us,              // 1. req_task 송신 간격
-                    g_last_rtt_us,                // 2. req->rx (RTT)
-                    sim_data.rx_to_ctrl_delay_us, // 3. rx->control 소요 시간
-                    (float)delay_ctrl_to_tx       // 4. control->tx 소요 시간
+                    sim_data.req_period_us,            // 1. req_task 송신 간격 (Queue)
+                    sim_data.rtt_us,                   // 2. req->rx (Queue)
+                    sim_data.ctrl_proc_us,             // 3. Control 처리 시간
+                    (float)delay_ctrl_to_tx,           // 4. Control 종료~Tx 송신까지 지연
+                    real_data.real_imu_pitch,          // 5. IMU Pitch
+                    real_data.real_imu_yaw             // 6. IMU Yaw
             );
 
             // 언리얼에 UDP 송신(소켓 뮤텍스 사용)
@@ -88,19 +104,12 @@ void tx_task(){
                 xSemaphoreGive(socketMutex);
             }
 
-            // 언리얼로 보낸 타임스탬프 출력(1초에 한 번씩)
-			print_cnt++;
-			if ((print_cnt % 50) == 0) {
-				if (xSemaphoreTake(printMutex, 0) == pdTRUE) {
-					printf("[TX] req_interval:%.1f req_recv_delta:%.1f rx_control_delay:%.1f control_to_unreal_delay:%.1f (us)\r\n",
-						   g_req_period_us,
-						   g_last_rtt_us,
-						   sim_data.rx_to_ctrl_delay_us,
-						   (float)delay_ctrl_to_tx
-					);
-					xSemaphoreGive(printMutex);
-				}
-			}
+            // 디버그 출력
+            printf("[TX] req_rtt:%.3f ctrl_proc:%.3f ctrl2tx:%.3f (us)\r\n",   // [MOD]
+                   sim_data.rtt_us,                                            // [MOD]
+                   sim_data.ctrl_proc_us,                                      // [MOD]
+                   (float)delay_ctrl_to_tx                                     // [MOD]
+            );
 
             XTime_GetTime(&tSendEnd);
 

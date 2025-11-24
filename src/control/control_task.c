@@ -1,4 +1,5 @@
 #define YAW_PITCH_TOLERANCE 0.3f // 오차 X, Y가 ±0.3 이내면 정지
+// (헤더 include 부분 생략, 위와 동일)
 #include "control_task.h"
 #include "control_queue.h"
 #include "../ibvs/ibvs_calculate.h"
@@ -46,10 +47,10 @@ void control_task(){
     float cur_mis_yaw   = 0.0f;
 
     // PID Gain Pitch, Yaw 각각 적용
-//    pid_init(&pid_pitch, 30.0f, 15.0f, 5.0f, 40.0f, -40.0f);  // 20ms 최적 PID 설정
-//    pid_init(&pid_yaw,   30.0f, 15.0f, 5.0f, 40.0f, -40.0f);
-    pid_init(&pid_pitch, 100.0f, 0.0f, 0.1f, 40.0f, -40.0f);
-    pid_init(&pid_yaw,   100.0f, 0.0f, 0.1f, 40.0f, -40.0f);
+    pid_init(&pid_pitch, 30.0f, 15.0f, 5.0f, 40.0f, -40.0f);  // 20ms 최적 PID 설정
+    pid_init(&pid_yaw,   30.0f, 15.0f, 5.0f, 40.0f, -40.0f);
+//    pid_init(&pid_pitch, 100.0f, 0.0f, 0.1f, 40.0f, -40.0f);
+//    pid_init(&pid_yaw,   100.0f, 0.0f, 0.1f, 40.0f, -40.0f);
 
     XTime time_last;
     XTime_GetTime(&time_last);
@@ -116,18 +117,11 @@ void control_task(){
         /* 데이터 수신 로직: 이번 주기에 새 데이터가 있으면 즉시 사용, 없으면 last_rx 유지 */
         BaseType_t rx_status = xQueueReceive(xControlQueue, &rx_from_queue, 0);
 
-        /* WCET 측정 시작 (순수 연산 시작점) */
+        /* WCET 측정 시작 (Control 처리 시작점) */
         XTime_GetTime(&tStart);
 
-        //  Rx -> Control 데이터 지연 시간 계산
-        // req 송신 시각 + RTT = rx 수신 완료 시각(추정)
-        // 현재(Control 시작) - rx 수신 완료 시각 = 지연 시간
-        double rtt_counts = (double)g_last_rtt_us * (COUNTS_PER_SECOND / 1000000.0);
-        XTime tRxFinishEstimated = g_req_send_timestamp + (XTime)rtt_counts;
-        double rx_to_ctrl_delay = (double)(tStart - tRxFinishEstimated) / (COUNTS_PER_SECOND / 1000000.0);
-
-        // 음수 방지 (타이밍 오차 등으로 인한)
-        if (rx_to_ctrl_delay < 0.0) rx_to_ctrl_delay = 0.0;
+        // (이전에는 여기서 Rx -> Control 지연(rx_to_ctrl_delay)을 계산했으나,
+        //  현재는 Control 자체 처리 시간만 별도로 측정하므로 제거)
 
         if (rx_status == pdTRUE) {
             last_rx = rx_from_queue;    // 최신 데이터 갱신
@@ -135,6 +129,7 @@ void control_task(){
         } else {
             // 이번 주기에 새 데이터 없음
             no_data_watchdog++;         // 카운터 증가
+            // last_rx의 시간 정보는 그대로 유지됨
         }
 
         //  Failsafe -> 0.1초 이상 데이터가 안 오는 경우 비행 방향을 유지
@@ -207,16 +202,10 @@ void control_task(){
         tx_to_queue.target_yaw    = target_yaw;
         tx_to_queue.sim_state     = sim_state;
 
-        // 시간 측정 데이터 패킹
-        tx_to_queue.rx_to_ctrl_delay_us = (float)rx_to_ctrl_delay; // 3. Rx->Ctrl 지연
-        tx_to_queue.ctrl_start_time = tStart;                      // 4. Ctrl 시작 시간 (Tx에서 사용)
-
-        // 큐로 제어 데이터 push
-        xQueueOverwrite(xControlOutQueue, &tx_to_queue);
-
         /* WCET / 평균 시간 측정 종료 및 기록 */
         XTime_GetTime(&tEnd);
-        double current_exec_us = (double)(tEnd - tStart) / (COUNTS_PER_SECOND / 1000000.0);
+        double current_exec_us =
+            (double)(tEnd - tStart) / (COUNTS_PER_SECOND / 1000000.0);
 
         g_time_ctrl_us = (float)current_exec_us;
         g_sum_ctrl_us  += current_exec_us;
@@ -226,5 +215,15 @@ void control_task(){
         if (current_exec_us > g_wcet_ctrl_us) {
             g_wcet_ctrl_us = current_exec_us;
         }
+
+        // 시간 측정 데이터 패킹
+        // 큐 데이터 기반으로 패킹
+        tx_to_queue.req_period_us     = last_rx.req_period_us;    // 1. Req Period (Pass)
+        tx_to_queue.rtt_us            = last_rx.rtt_us;           // 2. RTT (Pass)
+        tx_to_queue.ctrl_proc_us      = (float)current_exec_us;   // 3. Control 처리 시간
+        tx_to_queue.ctrl_finish_time  = tEnd;                     // 4. Control 종료 시각 (Tx에서 기준으로 사용)
+
+        // 큐로 제어 데이터 push
+        xQueueOverwrite(xControlOutQueue, &tx_to_queue);
     }
 }

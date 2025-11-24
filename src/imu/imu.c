@@ -3,11 +3,11 @@
 #include "math.h"
 #include "xil_printf.h"
 
-/* [중요] 하드웨어 연결 여부 스위치
+/* 하드웨어 연결 여부 스위치
  * 0: 센서 없음 (가상 모드 - 멈추지 않음)
  * 1: 실제 센서 연결됨 (I2C 통신 수행)
  */
-#define USE_REAL_IMU_HW     0
+#define USE_REAL_IMU_HW     1
 
 /* I2C Config */
 #define IMU_ADDR            0x68
