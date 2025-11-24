@@ -11,7 +11,7 @@
 
 // 태스크 시간 측정
 #include "xtime_l.h"
-#include "../sys_stat/system_stats.h"
+#include "../sys_stat/system_stats.h"    // [ADD]
 
 extern SemaphoreHandle_t printMutex;
 extern QueueHandle_t xRealDataQueue;
@@ -62,7 +62,7 @@ static u32 angle_to_pulse_counts(float angle)
 
 void vHwInterfaceTask(void *pvParameters)
 {
-	// 태스크 수행시간 측정용 변수
+    // 태스크 수행시간 측정용 변수
     XTime tStart, tEnd;
 
     u32 tcsr0_val = 0;
@@ -94,7 +94,7 @@ void vHwInterfaceTask(void *pvParameters)
         // 큐에서 (모터 ID + 각도)가 담긴 구조체를 수신
         if (xQueueReceive(xAngleQueue, &received_cmd, portMAX_DELAY) == pdPASS)
         {
-        	/* 시간 측정 시작 */
+            /* 시간 측정 시작 */
             XTime_GetTime(&tStart);
 
             // 유효한 motor_id인지 확인 (0~5)
@@ -114,7 +114,7 @@ void vHwInterfaceTask(void *pvParameters)
                     IMU_Update(0.02f);
                     imu_temp = IMU_GetData();
 
-                    // [수정] Roll 데이터를 Pitch로 매핑 (센서 부착 방향 반영)
+                    // Roll 데이터를 Pitch로 매핑 (센서 부착 방향 반영)
                     current_real_data.real_imu_pitch = imu_temp.angle_roll_deg;
                     current_real_data.real_imu_yaw   = imu_temp.angle_yaw_deg;
 
@@ -124,11 +124,17 @@ void vHwInterfaceTask(void *pvParameters)
                     }
                 }
 
-                /* 시간 측정 종료 */
-				XTime_GetTime(&tEnd);
+                /* 시간 측정 종료 및 통계 갱신 */
+                XTime_GetTime(&tEnd);
+                double exec_us = (double)(tEnd - tStart) / (COUNTS_PER_SECOND / 1000000.0);
 
-				// 매번 혹은 5번 모터일 때만 업데이트
-				g_time_hw_us = (float)((double)(tEnd - tStart) / (COUNTS_PER_SECOND / 1000000.0));
+                g_time_hw_us = (float)exec_us;
+                g_sum_hw_us  += exec_us;
+                g_cnt_hw++;
+                g_avg_hw_us = (g_cnt_hw > 0) ? (g_sum_hw_us / g_cnt_hw) : 0.0;
+                if (exec_us > g_wcet_hw_us) {
+                    g_wcet_hw_us = exec_us;
+                }
             }
         }
     }

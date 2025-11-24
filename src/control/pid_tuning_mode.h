@@ -15,7 +15,7 @@ typedef struct {
     int   has_params;       // 1¿Ã∏È P/I/D µø∫¿
 } PIDUpdate_t;
 
-extern QueueHandle_t xPidUpdateQueue; // [MOD]
+extern QueueHandle_t xPidUpdateQueue;
 
 #ifdef __cplusplus
 }

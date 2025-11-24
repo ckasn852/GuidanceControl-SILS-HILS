@@ -52,16 +52,18 @@ SemaphoreHandle_t printMutex;
 SemaphoreHandle_t socketMutex; // 소켓 뮤텍스
 
 // 외부에서 참조하는 큐 전역 생성
- QueueHandle_t xAngleQueue      = NULL;
- QueueHandle_t xAngleFbQueue    = NULL;
+QueueHandle_t xAngleQueue      = NULL;
+QueueHandle_t xAngleFbQueue    = NULL;
 QueueHandle_t xPidUpdateQueue  = NULL;      // PID 튜닝용 큐는 그대로 사용
 
 // 전역 인스턴스/핸들
 static XTtcPs  g_Ttc;
 TaskHandle_t gControlTaskHandle = NULL;
 TaskHandle_t gReqTaskHandle = NULL; // 요청 태스크 핸들
+
 // ISR 카운터는 전역으로 유지, control_task.c에서 extern으로 사용
 volatile uint32_t g_isr_cnt = 0;
+
 
 // FreeRTOS 인터럽트 설치 API 프로토타입
 BaseType_t xPortInstallInterruptHandler(uint8_t ucInterruptID, Xil_InterruptHandler pxHandler, void *pvCallBackRef);
@@ -194,10 +196,10 @@ int main()
     xTaskCreate(control_task, "control_task", CONTROL_STACKSIZE, NULL, PRIO_CONTROL, &gControlTaskHandle);
 
      // 하드웨어 인터페이스 태스크 생성 (기존 motor_driver_task)
-     xTaskCreate(vHwInterfaceTask, "hw_interface_task", MOTOR_STACKSIZE, NULL, PRIO_HW_IF, NULL);  // [MOD] HwInterface_ApplyCommands() 함수로 대체
+     xTaskCreate(vHwInterfaceTask, "hw_interface_task", MOTOR_STACKSIZE, NULL, PRIO_HW_IF, NULL);
 
      // 송신 태스크 생성
-     xTaskCreate(tx_task, "tx_task", TX_STACKSIZE, NULL, PRIO_TX, NULL);                           // [MOD] Tx_SendToUnreal() 함수로 대체
+     xTaskCreate(tx_task, "tx_task", TX_STACKSIZE, NULL, PRIO_TX, NULL);
 
     // 하드 타이머 시작은 스케줄러 시작 '직전'에 수행
     int rc = ttc_start_50hz();
