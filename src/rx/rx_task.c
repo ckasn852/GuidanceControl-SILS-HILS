@@ -19,9 +19,10 @@
 
 extern SemaphoreHandle_t printMutex;
 
-extern XTime g_req_send_timestamp;
-extern volatile int g_req_pending;
-extern float g_last_rtt_us;
+// [MOD] Req Task의 공유 변수 참조
+extern volatile XTime g_shared_req_time;
+extern volatile float g_shared_req_period;
+// [DEL] 기존 전역변수 g_req_send_timestamp, g_req_pending, g_last_rtt_us 제거
 
 char recv_buffer[MAX_BUFFER_LEN];
 int n;
@@ -35,6 +36,11 @@ void rx_task()
     // 데이터 패킷 보존을 위한 별도 버퍼 추가
     // recv_buffer는 Control/PID 패킷에 의해 덮어씌워질 수 있으므로, 순수 데이터는 여기에 백업
     char latest_data_buffer[MAX_BUFFER_LEN];
+
+    // 데이터 파싱 전 임시 저장할 시간 변수
+    float temp_rtt_us = 0.0f;
+    float temp_period_us = 0.0f;
+    XTime temp_rx_finish = 0;
 
     while (udp_sock < 0) {
         if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
@@ -59,14 +65,22 @@ void rx_task()
             if (n > 0) {
                 recv_buffer[n] = '\0';
 
-                // 데이터 송수신 간격 측정(데이터 수신 즉시)
-                if (g_req_pending == 1) {
-                    XTime tRxNow;
-                    XTime_GetTime(&tRxNow);
-                    double rtt = (double)(tRxNow - g_req_send_timestamp) / (COUNTS_PER_SECOND / 1000000.0);
-                    g_last_rtt_us = (float)rtt;
-                    g_req_pending = 0;
+                // 데이터 수신 시점 즉시 기록 (RTT 계산용)
+                XTime tRxNow;
+                XTime_GetTime(&tRxNow);
+
+                // RTT 계산: 공유 변수 사용
+                if (g_shared_req_time != 0 && tRxNow > g_shared_req_time) {
+                    temp_rtt_us = (float)(tRxNow - g_shared_req_time) / (float)(COUNTS_PER_SECOND / 1000000.0);
+                } else {
+                    temp_rtt_us = 0.0f;
                 }
+
+                // Req 주기 저장
+                temp_period_us = g_shared_req_period;
+
+                // Rx 종료 시간 저장 (Rx->Control 지연 계산용)
+                temp_rx_finish = tRxNow;
 
                 // 1. Control 패킷 우선 검사 및 즉시 처리
                 int ctrl;
@@ -136,31 +150,10 @@ void rx_task()
                &rx_from_unreal.y
         );
 
-//        if (parsed == 10) {
-//            if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
-//                // RTT 및 주요 데이터 한 줄 출력
-//                printf("[RX] Req_Recv_delta:%4.0fus PV:%6.2f YV:%6.2f XY:(%3d,%3d) D:%5.1f St:%d   \r\n",
-//                       g_last_rtt_us,
-//                       rx_from_unreal.pitch_rate,
-//                       rx_from_unreal.yaw_rate,
-//                       rx_from_unreal.img_x,
-//                       rx_from_unreal.img_y,
-//                       rx_from_unreal.distance,
-//                       rx_from_unreal.sim_state);
-//
-//                fflush(stdout);
-//                xSemaphoreGive(printMutex);
-//            }
-//        } else {
-//            // 파싱 실패 시 (디버깅용)
-//            if (xSemaphoreTake(printMutex, portMAX_DELAY) == pdTRUE) {
-//                printf("\n[RX ERR] Bad format (parsed=%d) buf=[%.20s...]\n", parsed, latest_data_buffer);
-//                xSemaphoreGive(printMutex);
-//            }
-//            XTime_GetTime(&tEnd);
-//
-//            continue;
-//        }
+        // [ADD] 측정된 시간 정보를 구조체에 담아 Control Task로 전달
+        rx_from_unreal.req_period_us = temp_period_us;
+        rx_from_unreal.rtt_us = temp_rtt_us;
+        rx_from_unreal.rx_finish_time = temp_rx_finish;
 
         // 큐 전송
         xQueueOverwrite(xControlQueue, &rx_from_unreal);

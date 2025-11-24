@@ -9,8 +9,12 @@ typedef struct {
     float target_pitch;
     float target_yaw;
     int sim_state;
-    float rx_to_ctrl_delay_us;  // 3. Rx -> Control 큐 지연 시간
-    XTime ctrl_start_time;      // 4. Control 시작 시간 (Tx에서 종료 시간과 비교하여 지연 계산용)
+
+    // Control -> Tx 로 넘길 시간 정보 추가
+    float req_period_us;           // Req 주기
+    float rtt_us;                  // RTT
+    float ctrl_proc_us;            // [MOD] Control 처리 시간 (Rx 데이터 처리 시작 ~ Tx로 넘기기 전까지)
+    XTime ctrl_finish_time;        // [MOD] Control 종료 시각 (Control->Tx 지연 계산용 기준 시각)
 } control_output;
 
 #endif

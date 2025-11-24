@@ -118,7 +118,6 @@ static int ttc_start_50hz(void)
     u8        prescaler;
 
     // 50Hz (20ms) 주기 계산
-    // XTtcPs_CalcIntervalFromFreq(&g_Ttc, 50, &interval, &prescaler);
     // 실제로는 100Hz(10ms) 주기로 설정하여 Req/Control 위상 분리
     XTtcPs_CalcIntervalFromFreq(&g_Ttc, 100, &interval, &prescaler);
     XTtcPs_SetPrescaler(&g_Ttc, prescaler);

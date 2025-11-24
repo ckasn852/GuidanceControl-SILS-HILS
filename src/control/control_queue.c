@@ -3,7 +3,7 @@
 
 QueueHandle_t xControlQueue = NULL;
 QueueHandle_t xControlOutQueue = NULL;
-QueueHandle_t xRealDataQueue = NULL;
+QueueHandle_t xRealDataQueue = NULL; // [MOD] 변수 복구
 
 void control_queue_init(void)
 {
@@ -13,6 +13,6 @@ void control_queue_init(void)
     // 출력 큐: 날개 각도 제어 명령
     xControlOutQueue = xQueueCreate(1, sizeof(control_output));
 
-    // 출력 큐: 하드웨어 피드백 신호 데이터
+    // IMU 데이터 전송을 위해 큐 생성
     xRealDataQueue = xQueueCreate(1, sizeof(real_sensor_data));
 }
