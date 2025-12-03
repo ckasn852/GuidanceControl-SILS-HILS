@@ -1,5 +1,6 @@
 # GuidanceControl-SILS-HILS
-Simulation and HILS platform for missile guidance and control system developed during LIG Nex1 Embedded SW Bootcamp.
+## Simulation and HILS platform for missile guidance and control system developed during LIG Nex1 Embedded SW Bootcamp.
+
 <img width="1073" height="469" alt="image" src="https://github.com/user-attachments/assets/52e0e13c-48c4-4f00-ab70-1efbd55a912d" />
 <img width="1048" height="488" alt="image" src="https://github.com/user-attachments/assets/d333a752-afcc-489d-bc24-251c2a15e4ae" />
 <img width="1102" height="493" alt="image" src="https://github.com/user-attachments/assets/9bbe9808-79a8-4533-a35a-581d0abf7c58" />
