@@ -1,6 +1,6 @@
 # GuidanceControl-SILS-HILS
 
-## HILS Platform for Missile Guidance and Control Developed at The SSEN Embedded SW School
+## HILS System for Missile Guidance and Control Developed at The SSEN Embedded SW School
 
 ## [HILS PPT](https://github.com/user-attachments/files/23897363/HILS.pdf)
 
